@@ -23,9 +23,30 @@ export function useTasks(teamId?: string | null) {
     }
   }, [teamId]);
 
+  const refreshSilently = useCallback(async () => {
+    try {
+      const latest = await api.fetchTasks(teamId);
+      setTasks(latest);
+    } catch {
+      // Ignore background sync errors
+    }
+  }, [teamId]);
+
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void refreshSilently();
+    }, 2500);
+    const onFocus = () => void refreshSilently();
+    window.addEventListener('focus', onFocus);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [refreshSilently]);
 
   const addTask = useCallback(
     async (

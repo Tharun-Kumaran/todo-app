@@ -198,6 +198,9 @@ app.post('/api/auth/register', async (req, res, next) => {
     // Tasks written before accounts existed belong to the very first account.
     if (isFirstUser) await store.claimUnowned(user.id);
 
+    // Link account to any existing team invitations
+    await teams.linkUser(user.id, user.email);
+
     sendSession(req, res, await sessions.create(user.id));
     res.status(201).json({ user });
   } catch (error) {
@@ -221,6 +224,7 @@ app.post('/api/auth/login', async (req, res, next) => {
       return;
     }
 
+    await teams.linkUser(user.id, user.email);
     sendSession(req, res, await sessions.create(user.id));
     res.json({ user });
   } catch (error) {

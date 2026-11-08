@@ -23,9 +23,30 @@ export function useTeams() {
     }
   }, []);
 
+  const refreshTeamsSilently = useCallback(async () => {
+    try {
+      const latest = await api.fetchTeams();
+      setTeams(latest);
+    } catch {
+      // Ignore background sync errors
+    }
+  }, []);
+
   useEffect(() => {
     void refreshTeams();
   }, [refreshTeams]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void refreshTeamsSilently();
+    }, 3000);
+    const onFocus = () => void refreshTeamsSilently();
+    window.addEventListener('focus', onFocus);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [refreshTeamsSilently]);
 
   const createNewTeam = useCallback(
     async (name: string): Promise<Team | null> => {
@@ -87,3 +108,4 @@ export function useTeams() {
     dismissError: () => setError(null),
   };
 }
+

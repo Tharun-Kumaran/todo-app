@@ -106,6 +106,34 @@ export class TeamStore {
     }));
   }
 
+  /** Link a user's id to any existing team invitations or ownerships matching their email. */
+  linkUser(userId: string, email: string): Promise<number> {
+    const normalized = email.toLowerCase();
+    return this.mutate((teams) => {
+      let linked = 0;
+      const next = teams.map((team) => {
+        let changed = false;
+        const members = team.members.map((m) => {
+          if (m.email.toLowerCase() === normalized && m.userId !== userId) {
+            changed = true;
+            linked += 1;
+            return { ...m, userId };
+          }
+          return m;
+        });
+        if (
+          team.ownerEmail.toLowerCase() === normalized &&
+          team.ownerId !== userId
+        ) {
+          changed = true;
+          return { ...team, ownerId: userId, members };
+        }
+        return changed ? { ...team, members } : team;
+      });
+      return { next, result: linked };
+    });
+  }
+
   addMember(
     teamId: string,
     requesterId: string,
