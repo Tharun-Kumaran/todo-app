@@ -258,6 +258,27 @@ export function TaskItem({
           </span>
         )}
 
+        {task.priority && !editing && (
+          <span
+            className={`priority-badge priority-${task.priority.toLowerCase()}`}
+            title={`Priority: ${task.priority}`}
+          >
+            {task.priority === 'Urgent'
+              ? '🔴 Urgent'
+              : task.priority === 'High'
+                ? '🟠 High'
+                : task.priority === 'Medium'
+                  ? '🟡 Med'
+                  : '⚪ Low'}
+          </span>
+        )}
+
+        {task.category && !editing && (
+          <span className="category-badge" title={`Category: ${task.category}`}>
+            {task.category}
+          </span>
+        )}
+
         {due && !editing && (
           <span className={`due-badge tone-${due.tone}`} title={due.title}>
             <CalendarIcon />

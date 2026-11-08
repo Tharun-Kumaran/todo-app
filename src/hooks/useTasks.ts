@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { Task } from '../../shared/types';
+import type { Priority, Task, TaskCategory } from '../../shared/types';
 import * as api from '../api';
 
 function errorMessage(error: unknown): string {
@@ -53,9 +53,18 @@ export function useTasks(teamId?: string | null) {
       text: string,
       dueAt: string | null,
       assigneeEmail?: string | null,
+      priority?: Priority | null,
+      category?: TaskCategory | null,
     ): Promise<boolean> => {
       try {
-        const task = await api.createTask(text, dueAt, teamId, assigneeEmail);
+        const task = await api.createTask(
+          text,
+          dueAt,
+          teamId,
+          assigneeEmail,
+          priority,
+          category,
+        );
         setTasks((current) => [task, ...current]);
         setError(null);
         return true;

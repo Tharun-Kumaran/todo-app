@@ -1,4 +1,12 @@
-import type { Task, Team, User } from '../shared/types';
+import type {
+  PredictionRequest,
+  PredictionResponse,
+  Priority,
+  Task,
+  TaskCategory,
+  Team,
+  User,
+} from '../shared/types';
 
 const base = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/+$/, '');
 
@@ -58,6 +66,8 @@ export interface TaskPatch {
   text?: string;
   done?: boolean;
   dueAt?: string | null;
+  priority?: Priority | null;
+  category?: TaskCategory | null;
   progress?: number;
   assigneeEmail?: string | null;
 }
@@ -146,6 +156,8 @@ export function createTask(
   dueAt: string | null = null,
   teamId?: string | null,
   assigneeEmail?: string | null,
+  priority?: Priority | null,
+  category?: TaskCategory | null,
 ): Promise<Task> {
   return request<{ task: Task }>('/api/tasks', {
     method: 'POST',
@@ -154,8 +166,19 @@ export function createTask(
       dueAt,
       teamId: teamId || null,
       assigneeEmail: assigneeEmail || null,
+      priority: priority || 'Medium',
+      category: category || null,
     }),
   }).then((data) => data.task);
+}
+
+export function predictTask(
+  data: PredictionRequest,
+): Promise<PredictionResponse> {
+  return request<{ prediction: PredictionResponse }>('/api/tasks/predict', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }).then((data) => data.prediction);
 }
 
 export function updateTask(id: string, patch: TaskPatch): Promise<Task> {

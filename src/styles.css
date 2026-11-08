@@ -1874,6 +1874,251 @@ h1 {
   white-space: nowrap;
 }
 
+/* ==========================================================================
+   Priority & Category Selects, Task Badges, and Feasibility Engine Card
+   ========================================================================== */
+
+.task-config-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 8px 14px;
+  background: var(--surface-subtle);
+  border-top: 1px dashed var(--line);
+  font-size: 12px;
+}
+
+.task-select-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.priority-select,
+.category-select {
+  padding: 4px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.priority-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.priority-badge.priority-urgent {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.priority-badge.priority-high {
+  background: rgba(249, 115, 22, 0.15);
+  color: #f97316;
+  border: 1px solid rgba(249, 115, 22, 0.3);
+}
+
+.priority-badge.priority-medium {
+  background: rgba(234, 179, 8, 0.15);
+  color: #d97706;
+  border: 1px solid rgba(234, 179, 8, 0.3);
+}
+
+.priority-badge.priority-low {
+  background: rgba(148, 163, 184, 0.15);
+  color: var(--muted);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+}
+
+.category-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--surface-subtle);
+  color: var(--muted);
+  border: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+/* Delay Prediction Feasibility Card */
+.feasibility-card {
+  margin: 10px 14px 14px 14px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  transition: all 0.2s ease-in-out;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  animation: fadeIn 0.25s ease-out;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.feasibility-card.risk-high {
+  background: rgba(239, 68, 68, 0.07);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.feasibility-card.risk-medium {
+  background: rgba(245, 158, 11, 0.07);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.feasibility-card.risk-low {
+  background: rgba(16, 185, 129, 0.07);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.feasibility-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.feasibility-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.risk-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.risk-indicator.indicator-high {
+  background: #ef4444;
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.6);
+}
+
+.risk-indicator.indicator-medium {
+  background: #f59e0b;
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.6);
+}
+
+.risk-indicator.indicator-low {
+  background: #10b981;
+  box-shadow: 0 0 6px rgba(16, 185, 129, 0.6);
+}
+
+.risk-badge-text {
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.risk-high .risk-badge-text { color: #ef4444; }
+.risk-medium .risk-badge-text { color: #d97706; }
+.risk-low .risk-badge-text { color: #10b981; }
+
+.risk-prob {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+
+.feasibility-meta {
+  font-size: 12px;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.meta-sep {
+  opacity: 0.5;
+}
+
+.feasibility-reasons {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+  padding: 4px 0;
+}
+
+.reason-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.reason-bullet {
+  color: var(--muted);
+  font-weight: bold;
+}
+
+.feasibility-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(150, 150, 150, 0.15);
+}
+
+.actions-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.action-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.rec-action-btn {
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  border-radius: 7px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease-in-out;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+.rec-action-btn:hover {
+  background: var(--accent);
+  color: #fff;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 5px rgba(91, 91, 214, 0.3);
+}
+
 .header-left {
   display: flex;
   align-items: center;

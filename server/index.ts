@@ -7,10 +7,11 @@ import express, {
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { User } from '../shared/types';
+import type { Priority, TaskCategory, User } from '../shared/types';
 import { TaskStore, type TaskPatch } from './store';
 import { UserStore, normalizeEmail, passwordProblem } from './users';
 import { TeamStore } from './teams';
+import { predictTaskFeasibility } from './prediction';
 import {
   SESSION_COOKIE,
   SessionStore,
@@ -105,6 +106,24 @@ function parseProgress(value: unknown): Parsed<number | undefined> {
     return { ok: false, error: '`progress` must be a number from 0 to 100.' };
   }
   return { ok: true, value: Math.min(100, Math.max(0, Math.round(value))) };
+}
+
+function parsePriority(value: unknown): Parsed<Priority | undefined> {
+  if (value === undefined) return { ok: true, value: undefined };
+  const valid: Priority[] = ['Low', 'Medium', 'High', 'Urgent'];
+  if (typeof value !== 'string' || !valid.includes(value as Priority)) {
+    return { ok: false, error: '`priority` must be Low, Medium, High, or Urgent.' };
+  }
+  return { ok: true, value: value as Priority };
+}
+
+function parseCategory(value: unknown): Parsed<TaskCategory | null | undefined> {
+  if (value === undefined) return { ok: true, value: undefined };
+  if (value === null || value === '') return { ok: true, value: null };
+  if (typeof value !== 'string') {
+    return { ok: false, error: '`category` must be a string or null.' };
+  }
+  return { ok: true, value: value as TaskCategory };
 }
 
 function sessionDays(value: string | undefined): number {
@@ -382,6 +401,8 @@ app.post('/api/tasks', requireUser, async (req, res, next) => {
       dueAt?: unknown;
       teamId?: unknown;
       assigneeEmail?: unknown;
+      priority?: unknown;
+      category?: unknown;
     };
     const text = readText(body.text);
     if (!text) {
@@ -410,6 +431,18 @@ app.post('/api/tasks', requireUser, async (req, res, next) => {
         ? body.assigneeEmail.trim().toLowerCase()
         : null;
 
+    const priority = parsePriority(body.priority);
+    if (!priority.ok) {
+      res.status(400).json({ error: priority.error });
+      return;
+    }
+
+    const category = parseCategory(body.category);
+    if (!category.ok) {
+      res.status(400).json({ error: category.error });
+      return;
+    }
+
     const task = await store.add(
       currentUserId(res),
       currentUserEmail(res),
@@ -417,11 +450,41 @@ app.post('/api/tasks', requireUser, async (req, res, next) => {
       dueAt.value ?? null,
       teamId,
       assigneeEmail,
+      priority.value,
+      category.value,
     );
     res.status(201).json({ task });
   } catch (error) {
     next(error);
   }
+});
+
+app.post('/api/tasks/predict', requireUser, (req, res) => {
+  const body = (req.body ?? {}) as {
+    text?: unknown;
+    dueAt?: unknown;
+    priority?: unknown;
+    category?: unknown;
+    shiftCount?: unknown;
+  };
+  const text = typeof body.text === 'string' ? body.text.trim() : '';
+  const dueAt =
+    typeof body.dueAt === 'string' && body.dueAt.trim() ? body.dueAt.trim() : null;
+  const priority =
+    typeof body.priority === 'string' ? (body.priority as Priority) : undefined;
+  const category =
+    typeof body.category === 'string' ? (body.category as TaskCategory) : undefined;
+  const shiftCount = typeof body.shiftCount === 'number' ? body.shiftCount : 0;
+
+  const prediction = predictTaskFeasibility({
+    text,
+    dueAt,
+    priority,
+    category,
+    shiftCount,
+  });
+
+  res.json({ prediction });
 });
 
 app.patch('/api/tasks/:id', requireUser, async (req, res, next) => {
@@ -430,6 +493,8 @@ app.patch('/api/tasks/:id', requireUser, async (req, res, next) => {
       text?: unknown;
       done?: unknown;
       dueAt?: unknown;
+      priority?: unknown;
+      category?: unknown;
       progress?: unknown;
       assigneeEmail?: unknown;
     };
@@ -450,6 +515,24 @@ app.patch('/api/tasks/:id', requireUser, async (req, res, next) => {
         return;
       }
       patch.done = body.done;
+    }
+
+    if (body.priority !== undefined) {
+      const priority = parsePriority(body.priority);
+      if (!priority.ok) {
+        res.status(400).json({ error: priority.error });
+        return;
+      }
+      patch.priority = priority.value;
+    }
+
+    if (body.category !== undefined) {
+      const category = parseCategory(body.category);
+      if (!category.ok) {
+        res.status(400).json({ error: category.error });
+        return;
+      }
+      patch.category = category.value;
     }
 
     const progress = parseProgress(body.progress);

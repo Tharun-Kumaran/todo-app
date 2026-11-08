@@ -1,3 +1,15 @@
+export type Priority = 'Low' | 'Medium' | 'High' | 'Urgent';
+
+export type TaskCategory =
+  | 'Software Engineering'
+  | 'Product Design'
+  | 'DevOps & Infrastructure'
+  | 'Data Engineering & AI'
+  | 'Quality Assurance'
+  | 'Finance & Compliance'
+  | 'Operations'
+  | 'Marketing & Content';
+
 export interface Milestone {
   id: string;
   text: string;
@@ -46,10 +58,45 @@ export interface Task {
   completedAt: string | null;
   /** ISO timestamp of the deadline, or null when none is set. */
   dueAt: string | null;
+  /** Task priority (Low, Medium, High, Urgent). */
+  priority?: Priority | null;
+  /** Task category / department. */
+  category?: TaskCategory | null;
   /** Current completion percentage (0-100). */
   progress: number;
   /** Timestamped progress updates, oldest first. */
   milestones: Milestone[];
+}
+
+export interface RecommendationOption {
+  id: string;
+  type: 'set_deadline' | 'change_priority' | 'split_task';
+  label: string;
+  value?: string;
+}
+
+export interface PredictionRequest {
+  text: string;
+  dueAt?: string | null;
+  priority?: Priority;
+  category?: TaskCategory;
+}
+
+export interface PredictionResponse {
+  riskLevel: 'LOW' | 'MEDIUM' | 'HIGH';
+  delayProbability: number;
+  predictedDurationDays: number;
+  suggestedLeadDays: number;
+  suggestedDueAt: string;
+  reasons: string[];
+  recommendations: RecommendationOption[];
+  benchmark: {
+    category: TaskCategory;
+    priority: Priority;
+    actionVerb: string;
+    medianDays: number;
+    p85Days: number;
+  };
 }
 
 export interface TasksResponse {

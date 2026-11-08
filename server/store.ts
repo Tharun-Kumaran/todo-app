@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import type { Milestone, Task } from '../shared/types';
+import type { Milestone, Priority, Task, TaskCategory } from '../shared/types';
 
 interface TaskFile {
   version: 3;
@@ -18,6 +18,8 @@ export interface TaskPatch {
   text?: string;
   done?: boolean;
   dueAt?: string | null;
+  priority?: Priority | null;
+  category?: TaskCategory | null;
   progress?: number;
   assigneeEmail?: string | null;
 }
@@ -104,6 +106,8 @@ export class TaskStore {
     dueAt: string | null,
     teamId?: string | null,
     assigneeEmail?: string | null,
+    priority?: Priority | null,
+    category?: TaskCategory | null,
   ): Promise<Task> {
     const now = new Date().toISOString();
     const task: StoredTask = {
@@ -112,6 +116,8 @@ export class TaskStore {
       creatorEmail,
       teamId: teamId || null,
       assigneeEmail: assigneeEmail || null,
+      priority: priority || 'Medium',
+      category: category || null,
       text,
       done: false,
       createdAt: now,
@@ -342,6 +348,8 @@ function toTask(task: StoredTask): Task {
     creatorEmail: task.creatorEmail ?? null,
     teamId: task.teamId ?? null,
     assigneeEmail: task.assigneeEmail ?? null,
+    priority: task.priority ?? 'Medium',
+    category: task.category ?? null,
     milestones: task.milestones.map((entry) => ({ ...entry })),
   };
 }
@@ -371,6 +379,15 @@ function normalizeTask(value: unknown): StoredTask | null {
         ? 100
         : 0;
 
+  const validPriorities = ['Low', 'Medium', 'High', 'Urgent'];
+  const priority = typeof task.priority === 'string' && validPriorities.includes(task.priority)
+    ? (task.priority as Priority)
+    : 'Medium';
+
+  const category = typeof task.category === 'string' && task.category.length > 0
+    ? (task.category as TaskCategory)
+    : null;
+
   return {
     id: task.id,
     userId:
@@ -389,6 +406,8 @@ function normalizeTask(value: unknown): StoredTask | null {
       typeof task.assigneeEmail === 'string' && task.assigneeEmail.length > 0
         ? task.assigneeEmail
         : null,
+    priority,
+    category,
     text: task.text,
     done: task.done,
     createdAt: task.createdAt,
