@@ -10,9 +10,13 @@ export function EmptyState({ filter, total }: Props) {
   const message =
     total === 0
       ? 'Nothing here yet. Add your first task above.'
-      : filter === 'active'
-        ? 'All clear — no active tasks. Nice work!'
-        : 'No completed tasks yet.';
+      : filter === 'pending'
+        ? 'All clear — no pending tasks. Nice work!'
+        : filter === 'overdue'
+          ? 'No overdue tasks. You are on top of things!'
+          : filter === 'completed'
+            ? 'No completed tasks yet.'
+            : 'Nothing here yet. Add your first task above.';
 
   return (
     <div className="empty">

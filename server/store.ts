@@ -70,6 +70,7 @@ export class TaskStore {
       done: false,
       createdAt: now,
       updatedAt: now,
+      completedAt: null,
       dueAt,
       progress: 0,
       milestones: [],
@@ -83,10 +84,11 @@ export class TaskStore {
       if (index === -1) return { next: tasks, result: null };
 
       const current = tasks[index];
+      const now = new Date().toISOString();
       const updated: Task = {
         ...current,
         ...patch,
-        updatedAt: new Date().toISOString(),
+        updatedAt: now,
       };
 
       // Keep `done` and `progress` coherent no matter which one was sent.
@@ -96,6 +98,13 @@ export class TaskStore {
         updated.progress = patch.done ? 100 : 0;
       }
       updated.progress = clamp(updated.progress);
+
+      // Stamp the transition into/out of the completed state.
+      if (!updated.done) {
+        updated.completedAt = null;
+      } else if (!current.done || !current.completedAt) {
+        updated.completedAt = now;
+      }
 
       const next = [...tasks];
       next[index] = updated;
@@ -114,19 +123,22 @@ export class TaskStore {
 
       const current = tasks[index];
       const value = clamp(progress ?? current.progress);
+      const now = new Date().toISOString();
       const milestone: Milestone = {
         id: randomUUID(),
         text,
         progress: value,
-        createdAt: new Date().toISOString(),
+        createdAt: now,
       };
 
       const updated: Task = {
         ...current,
         progress: value,
         done: value >= 100,
+        completedAt:
+          value >= 100 ? (current.completedAt ?? now) : null,
         milestones: [...current.milestones, milestone],
-        updatedAt: new Date().toISOString(),
+        updatedAt: now,
       };
 
       const next = [...tasks];
@@ -226,6 +238,13 @@ function normalizeTask(value: unknown): Task | null {
     done: task.done,
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
+    completedAt:
+      typeof task.completedAt === 'string' &&
+      !Number.isNaN(Date.parse(task.completedAt))
+        ? task.completedAt
+        : task.done
+          ? task.updatedAt
+          : null,
     dueAt:
       typeof task.dueAt === 'string' && !Number.isNaN(Date.parse(task.dueAt))
         ? task.dueAt

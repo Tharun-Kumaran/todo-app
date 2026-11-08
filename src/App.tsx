@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { Filter } from '../shared/types';
+import type { Filter, Task } from '../shared/types';
 import { useTasks } from './hooks/useTasks';
 import { Header } from './components/Header';
 import { TaskForm } from './components/TaskForm';
@@ -29,22 +29,33 @@ export default function App() {
   const [filter, setFilter] = useState<Filter>('all');
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
+  // Re-evaluate overdue tasks while the app stays open.
+  const [now, setNow] = useState(() => Date.now());
 
-  const { visible, total, done, active } = useMemo(() => {
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const { visible, total, done, pending, overdue } = useMemo(() => {
     const doneCount = tasks.filter((task) => task.done).length;
+    const overdueCount = tasks.filter((task) => isOverdue(task, now)).length;
     const visibleTasks =
-      filter === 'active'
+      filter === 'pending'
         ? tasks.filter((task) => !task.done)
-        : filter === 'completed'
-          ? tasks.filter((task) => task.done)
-          : tasks;
+        : filter === 'overdue'
+          ? tasks.filter((task) => isOverdue(task, now))
+          : filter === 'completed'
+            ? tasks.filter((task) => task.done)
+            : tasks;
     return {
       visible: visibleTasks,
       total: tasks.length,
       done: doneCount,
-      active: tasks.length - doneCount,
+      pending: tasks.length - doneCount,
+      overdue: overdueCount,
     };
-  }, [tasks, filter]);
+  }, [tasks, filter, now]);
 
   const canReorder = filter === 'all' && !loading && visible.length > 1;
   const percent = total
@@ -151,13 +162,14 @@ export default function App() {
 
       <footer className="footer">
         <span className="count" aria-live="polite">
-          {countLabel(total, active)}
+          {countLabel(total, pending, overdue)}
         </span>
         <Filters
           value={filter}
           onChange={setFilter}
           total={total}
-          active={active}
+          pending={pending}
+          overdue={overdue}
           done={done}
         />
         <button
@@ -173,8 +185,17 @@ export default function App() {
   );
 }
 
-function countLabel(total: number, active: number): string {
+function isOverdue(task: Task, now: number): boolean {
+  return (
+    !task.done &&
+    task.dueAt !== null &&
+    new Date(task.dueAt).getTime() < now
+  );
+}
+
+function countLabel(total: number, pending: number, overdue: number): string {
   if (total === 0) return 'No tasks';
-  if (active === 0) return 'All done 🎉';
-  return `${active} task${active === 1 ? '' : 's'} left`;
+  if (pending === 0) return 'All done 🎉';
+  const base = `${pending} task${pending === 1 ? '' : 's'} left`;
+  return overdue > 0 ? `${base} · ${overdue} overdue` : base;
 }

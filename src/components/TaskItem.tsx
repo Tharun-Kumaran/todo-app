@@ -8,6 +8,7 @@ import {
 import type { Task } from '../../shared/types';
 import {
   describeDue,
+  formatDateTime,
   formatMilestoneTime,
   fromDateTimeLocal,
   toDateTimeLocal,
@@ -63,6 +64,11 @@ export function TaskItem({
 
   const due = describeDue(task.dueAt, task.done);
   const detailsId = `task-details-${task.id}`;
+  const status = task.done
+    ? 'Completed'
+    : due?.tone === 'overdue'
+      ? 'Overdue'
+      : 'Pending';
 
   useEffect(() => {
     if (editing) {
@@ -350,6 +356,37 @@ export function TaskItem({
               </div>
             </section>
           </div>
+
+          <section className="detail-card">
+            <div className="detail-head">
+              <h3>Task info</h3>
+              <span className={`detail-count status-${status.toLowerCase()}`}>
+                {status}
+              </span>
+            </div>
+            <dl className="meta-grid">
+              <div>
+                <dt>Created</dt>
+                <dd>{formatDateTime(task.createdAt)}</dd>
+              </div>
+              <div>
+                <dt>Last updated</dt>
+                <dd>{formatDateTime(task.updatedAt)}</dd>
+              </div>
+              <div>
+                <dt>Completed</dt>
+                <dd>
+                  {task.completedAt
+                    ? formatDateTime(task.completedAt)
+                    : 'Not completed'}
+                </dd>
+              </div>
+              <div>
+                <dt>Deadline</dt>
+                <dd>{task.dueAt ? formatDateTime(task.dueAt) : 'None'}</dd>
+              </div>
+            </dl>
+          </section>
 
           <section className="detail-card">
             <div className="detail-head">

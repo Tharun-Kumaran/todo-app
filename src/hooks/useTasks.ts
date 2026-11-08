@@ -48,6 +48,7 @@ export function useTasks() {
       ...task,
       done: nextDone,
       progress: nextDone ? 100 : 0,
+      completedAt: nextDone ? new Date().toISOString() : null,
     };
     setTasks((current) =>
       current.map((item) => (item.id === task.id ? optimistic : item)),
@@ -91,7 +92,15 @@ export function useTasks() {
   const setProgress = useCallback(
     async (task: Task, progress: number): Promise<boolean> => {
       const value = Math.min(100, Math.max(0, Math.round(progress)));
-      const optimistic: Task = { ...task, progress: value, done: value >= 100 };
+      const optimistic: Task = {
+        ...task,
+        progress: value,
+        done: value >= 100,
+        completedAt:
+          value >= 100
+            ? (task.completedAt ?? new Date().toISOString())
+            : null,
+      };
       setTasks((current) =>
         current.map((item) => (item.id === task.id ? optimistic : item)),
       );

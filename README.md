@@ -51,10 +51,12 @@ Tasks live in `server/data/tasks.json`. The file is created on first run and is
 git-ignored because it contains your personal list. Writes go through a temp
 file and an atomic rename, and mutations are serialized to avoid lost updates.
 
-Each task stores `dueAt`, `progress`, and a `milestones` array. Files written by
-older versions (without those fields) are migrated on load: deadlines default
-to `null`, completed tasks to 100%, everything else to 0%, and the milestone
-list to empty.
+Each task stores `dueAt`, `progress`, `completedAt`, and a `milestones` array.
+`completedAt` is stamped when a task becomes complete and cleared when it is
+reopened. Files written by older versions (without those fields) are migrated
+on load: deadlines and completion timestamps default to `null` (with completed
+tasks using `updatedAt` as their completion time), completed tasks to 100%,
+everything else to 0%, and the milestone list to empty.
 
 Overrides:
 
@@ -97,7 +99,12 @@ time.
 - Timestamped progress updates ("milestones") that record a comment together
   with the completion percentage at that moment
 - Deadline editing and clearing from the task's details panel
-- All / Active / Done filters with live counts and an overall progress bar
+- All / Pending / Overdue / Completed filters with live counts and an overall
+  progress bar. Pending includes overdue tasks; Overdue means a task with a
+  past deadline that is not yet complete
+- Every task (including completed and overdue ones) keeps its full detail
+  panel: progress, deadline, progress updates, and created / last updated /
+  completed timestamps
 - Drag to reorder in the All view
 - Light/dark theme, following the system by default
 - `/` focuses the new-task input

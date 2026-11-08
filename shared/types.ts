@@ -12,6 +12,8 @@ export interface Task {
   done: boolean;
   createdAt: string;
   updatedAt: string;
+  /** ISO timestamp of when the task was completed, or null while pending. */
+  completedAt: string | null;
   /** ISO timestamp of the deadline, or null when none is set. */
   dueAt: string | null;
   /** Current completion percentage (0-100). */
@@ -28,4 +30,4 @@ export interface TaskResponse {
   task: Task;
 }
 
-export type Filter = 'all' | 'active' | 'completed';
+export type Filter = 'all' | 'pending' | 'overdue' | 'completed';

@@ -2,20 +2,34 @@ import type { Filter } from '../../shared/types';
 
 const LABELS: Record<Filter, string> = {
   all: 'All',
-  active: 'Active',
-  completed: 'Done',
+  pending: 'Pending',
+  overdue: 'Overdue',
+  completed: 'Completed',
 };
 
 interface Props {
   value: Filter;
   onChange: (filter: Filter) => void;
   total: number;
-  active: number;
+  pending: number;
+  overdue: number;
   done: number;
 }
 
-export function Filters({ value, onChange, total, active, done }: Props) {
-  const counts: Record<Filter, number> = { all: total, active, completed: done };
+export function Filters({
+  value,
+  onChange,
+  total,
+  pending,
+  overdue,
+  done,
+}: Props) {
+  const counts: Record<Filter, number> = {
+    all: total,
+    pending,
+    overdue,
+    completed: done,
+  };
 
   return (
     <div className="filters" role="group" aria-label="Filter tasks">
