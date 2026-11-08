@@ -6,8 +6,16 @@ export interface Milestone {
   createdAt: string;
 }
 
+export interface User {
+  id: string;
+  email: string;
+  createdAt: string;
+}
+
 export interface Task {
   id: string;
+  /** Owner of the task. Tasks are only returned to their owner. */
+  userId: string;
   text: string;
   done: boolean;
   createdAt: string;
@@ -28,6 +36,10 @@ export interface TasksResponse {
 
 export interface TaskResponse {
   task: Task;
+}
+
+export interface AuthResponse {
+  user: User;
 }
 
 export type Filter = 'all' | 'pending' | 'overdue' | 'completed';

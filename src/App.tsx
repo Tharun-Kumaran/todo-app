@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { Filter, Task } from '../shared/types';
+import type { Filter, Task, User } from '../shared/types';
+import { useAuth } from './hooks/useAuth';
 import { useTasks } from './hooks/useTasks';
+import { AuthScreen } from './components/AuthScreen';
 import { Header } from './components/Header';
 import { TaskForm } from './components/TaskForm';
 import { TaskItem } from './components/TaskItem';
@@ -9,6 +11,47 @@ import { Filters } from './components/Filters';
 import { ProgressBar } from './components/ProgressBar';
 
 export default function App() {
+  const {
+    user,
+    loading: authLoading,
+    error: authError,
+    signIn,
+    signUp,
+    signOut,
+  } = useAuth();
+
+  if (authLoading) {
+    return (
+      <main className="app">
+        <div className="loading" aria-live="polite">
+          <span className="spinner" aria-hidden="true" />
+          Checking your session…
+        </div>
+      </main>
+    );
+  }
+
+  if (!user) {
+    return (
+      <AuthScreen
+        initialError={authError}
+        onSignIn={signIn}
+        onSignUp={signUp}
+      />
+    );
+  }
+
+  return (
+    <TodoApp key={user.id} user={user} onSignOut={() => void signOut()} />
+  );
+}
+
+interface TodoAppProps {
+  user: User;
+  onSignOut: () => void;
+}
+
+function TodoApp({ user, onSignOut }: TodoAppProps) {
   const {
     tasks,
     loading,
@@ -112,7 +155,7 @@ export default function App() {
 
   return (
     <main className="app">
-      <Header />
+      <Header user={user} onSignOut={onSignOut} />
       <ProgressBar percent={percent} />
 
       {error && (

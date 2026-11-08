@@ -1,22 +1,76 @@
-import express, { type ErrorRequestHandler } from 'express';
+import express, {
+  type ErrorRequestHandler,
+  type Request,
+  type RequestHandler,
+  type Response,
+} from 'express';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { User } from '../shared/types';
 import { TaskStore, type TaskPatch } from './store';
+import { UserStore, normalizeEmail, passwordProblem } from './users';
+import {
+  SESSION_COOKIE,
+  SessionStore,
+  clearSessionCookie,
+  readCookie,
+  sessionCookie,
+  type SameSite,
+} from './sessions';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+const dataDir = path.join(here, 'data');
 const dataFile = process.env.TODO_DATA_FILE
   ? path.resolve(process.env.TODO_DATA_FILE)
-  : path.join(here, 'data', 'tasks.json');
+  : path.join(dataDir, 'tasks.json');
+const usersFile = process.env.TODO_USERS_FILE
+  ? path.resolve(process.env.TODO_USERS_FILE)
+  : path.join(dataDir, 'users.json');
+const sessionsFile = process.env.TODO_SESSIONS_FILE
+  ? path.resolve(process.env.TODO_SESSIONS_FILE)
+  : path.join(dataDir, 'sessions.json');
+
 const port = Number(process.env.PORT) || 3001;
 const maxTextLength = 500;
 const maxMilestoneLength = 1000;
+const sessionTtlMs = sessionDays(process.env.TODO_SESSION_DAYS) * 86_400_000;
+const cookieSameSite: SameSite =
+  process.env.TODO_COOKIE_SAMESITE?.trim().toLowerCase() === 'none'
+    ? 'None'
+    : 'Lax';
+const corsOrigin = process.env.TODO_CORS_ORIGIN?.trim() || null;
 
 const store = new TaskStore(dataFile);
-await store.init();
+const users = new UserStore(usersFile);
+const sessions = new SessionStore(sessionsFile, sessionTtlMs);
+await Promise.all([store.init(), users.init(), sessions.init()]);
 
 const app = express();
 app.disable('x-powered-by');
+// Needed for req.secure / X-Forwarded-Proto when deployed behind a proxy.
+app.set('trust proxy', 1);
+
+if (corsOrigin) {
+  app.use((req, res, next) => {
+    if (req.headers.origin === corsOrigin) {
+      res.setHeader('Access-Control-Allow-Origin', corsOrigin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      res.setHeader(
+        'Access-Control-Allow-Methods',
+        'GET,POST,PATCH,PUT,DELETE,OPTIONS',
+      );
+    }
+    if (req.method === 'OPTIONS') {
+      res.status(204).end();
+      return;
+    }
+    next();
+  });
+}
+
 app.use(express.json({ limit: '200kb' }));
 
 type Parsed<T> = { ok: true; value: T } | { ok: false; error: string };
@@ -48,16 +102,142 @@ function parseProgress(value: unknown): Parsed<number | undefined> {
   return { ok: true, value: Math.min(100, Math.max(0, Math.round(value))) };
 }
 
+function sessionDays(value: string | undefined): number {
+  const days = Number(value);
+  if (!Number.isFinite(days) || days < 1 || days > 365) return 30;
+  return days;
+}
+
+function cookieOptions(req: Request) {
+  const secure =
+    cookieSameSite === 'None' ||
+    process.env.TODO_COOKIE_SECURE === '1' ||
+    req.secure ||
+    req.headers['x-forwarded-proto'] === 'https';
+  return { secure, sameSite: cookieSameSite };
+}
+
+function sendSession(req: Request, res: Response, token: string): void {
+  res.setHeader(
+    'Set-Cookie',
+    sessionCookie(token, Math.floor(sessionTtlMs / 1000), cookieOptions(req)),
+  );
+}
+
+const requireUser: RequestHandler = (req, res, next) => {
+  const token = readCookie(req.headers.cookie, SESSION_COOKIE);
+  const userId = token ? sessions.userIdFor(token) : null;
+  const user = userId ? users.findById(userId) : null;
+
+  if (!user) {
+    if (token) {
+      void sessions.destroy(token);
+      res.setHeader('Set-Cookie', clearSessionCookie(cookieOptions(req)));
+    }
+    res.status(401).json({ error: 'Sign in required.' });
+    return;
+  }
+
+  res.locals.user = user;
+  next();
+};
+
+function currentUserId(res: Response): string {
+  return (res.locals.user as User).id;
+}
+
+function routeParam(req: Request, name: string): string {
+  const value = req.params[name];
+  return Array.isArray(value) ? (value[0] ?? '') : value;
+}
+
+// --- Authentication -------------------------------------------------------
+
+app.post('/api/auth/register', async (req, res, next) => {
+  try {
+    const body = (req.body ?? {}) as { email?: unknown; password?: unknown };
+    const email = normalizeEmail(body.email);
+    if (!email) {
+      res.status(400).json({ error: 'Enter a valid email address.' });
+      return;
+    }
+
+    const password = typeof body.password === 'string' ? body.password : '';
+    const problem = passwordProblem(password);
+    if (problem) {
+      res.status(400).json({ error: problem });
+      return;
+    }
+
+    const isFirstUser = users.count() === 0;
+    const user = await users.create(email, password);
+    if (!user) {
+      res
+        .status(409)
+        .json({ error: 'An account with this email already exists.' });
+      return;
+    }
+
+    // Tasks written before accounts existed belong to the very first account.
+    if (isFirstUser) await store.claimUnowned(user.id);
+
+    sendSession(req, res, await sessions.create(user.id));
+    res.status(201).json({ user });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/auth/login', async (req, res, next) => {
+  try {
+    const body = (req.body ?? {}) as { email?: unknown; password?: unknown };
+    const email = normalizeEmail(body.email);
+    const password = typeof body.password === 'string' ? body.password : '';
+    if (!email || !password) {
+      res.status(400).json({ error: 'Email and password are required.' });
+      return;
+    }
+
+    const user = await users.authenticate(email, password);
+    if (!user) {
+      res.status(401).json({ error: 'Invalid email or password.' });
+      return;
+    }
+
+    sendSession(req, res, await sessions.create(user.id));
+    res.json({ user });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/auth/me', requireUser, (_req, res) => {
+  res.json({ user: res.locals.user });
+});
+
+app.post('/api/auth/logout', async (req, res, next) => {
+  try {
+    const token = readCookie(req.headers.cookie, SESSION_COOKIE);
+    if (token) await sessions.destroy(token);
+    res.setHeader('Set-Cookie', clearSessionCookie(cookieOptions(req)));
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+// --- Tasks ----------------------------------------------------------------
+
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, tasks: store.list().length });
+  res.json({ ok: true });
 });
 
-app.get('/api/tasks', (_req, res) => {
-  res.json({ tasks: store.list() });
+app.get('/api/tasks', requireUser, (_req, res) => {
+  res.json({ tasks: store.listFor(currentUserId(res)) });
 });
 
-app.get('/api/tasks/:id', (req, res) => {
-  const task = store.get(req.params.id);
+app.get('/api/tasks/:id', requireUser, (req, res) => {
+  const task = store.get(currentUserId(res), routeParam(req, 'id'));
   if (!task) {
     res.status(404).json({ error: 'Task not found.' });
     return;
@@ -65,7 +245,7 @@ app.get('/api/tasks/:id', (req, res) => {
   res.json({ task });
 });
 
-app.post('/api/tasks', async (req, res, next) => {
+app.post('/api/tasks', requireUser, async (req, res, next) => {
   try {
     const body = (req.body ?? {}) as { text?: unknown; dueAt?: unknown };
     const text = readText(body.text);
@@ -80,14 +260,18 @@ app.post('/api/tasks', async (req, res, next) => {
       return;
     }
 
-    const task = await store.add(text, dueAt.value ?? null);
+    const task = await store.add(
+      currentUserId(res),
+      text,
+      dueAt.value ?? null,
+    );
     res.status(201).json({ task });
   } catch (error) {
     next(error);
   }
 });
 
-app.patch('/api/tasks/:id', async (req, res, next) => {
+app.patch('/api/tasks/:id', requireUser, async (req, res, next) => {
   try {
     const body = (req.body ?? {}) as {
       text?: unknown;
@@ -133,7 +317,11 @@ app.patch('/api/tasks/:id', async (req, res, next) => {
       return;
     }
 
-    const task = await store.update(req.params.id, patch);
+    const task = await store.update(
+      currentUserId(res),
+      routeParam(req, 'id'),
+      patch,
+    );
     if (!task) {
       res.status(404).json({ error: 'Task not found.' });
       return;
@@ -144,7 +332,7 @@ app.patch('/api/tasks/:id', async (req, res, next) => {
   }
 });
 
-app.post('/api/tasks/:id/milestones', async (req, res, next) => {
+app.post('/api/tasks/:id/milestones', requireUser, async (req, res, next) => {
   try {
     const body = (req.body ?? {}) as { text?: unknown; progress?: unknown };
     const text = readText(body.text, maxMilestoneLength);
@@ -159,7 +347,12 @@ app.post('/api/tasks/:id/milestones', async (req, res, next) => {
       return;
     }
 
-    const task = await store.addMilestone(req.params.id, text, progress.value);
+    const task = await store.addMilestone(
+      currentUserId(res),
+      routeParam(req, 'id'),
+      text,
+      progress.value,
+    );
     if (!task) {
       res.status(404).json({ error: 'Task not found.' });
       return;
@@ -170,9 +363,12 @@ app.post('/api/tasks/:id/milestones', async (req, res, next) => {
   }
 });
 
-app.delete('/api/tasks/:id', async (req, res, next) => {
+app.delete('/api/tasks/:id', requireUser, async (req, res, next) => {
   try {
-    const removed = await store.remove(req.params.id);
+    const removed = await store.remove(
+      currentUserId(res),
+      routeParam(req, 'id'),
+    );
     if (!removed) {
       res.status(404).json({ error: 'Task not found.' });
       return;
@@ -183,22 +379,22 @@ app.delete('/api/tasks/:id', async (req, res, next) => {
   }
 });
 
-app.post('/api/tasks/clear-completed', async (_req, res, next) => {
+app.post('/api/tasks/clear-completed', requireUser, async (_req, res, next) => {
   try {
-    res.json({ tasks: await store.clearCompleted() });
+    res.json({ tasks: await store.clearCompleted(currentUserId(res)) });
   } catch (error) {
     next(error);
   }
 });
 
-app.put('/api/tasks/order', async (req, res, next) => {
+app.put('/api/tasks/order', requireUser, async (req, res, next) => {
   try {
     const ids = (req.body as { ids?: unknown } | undefined)?.ids;
     if (!Array.isArray(ids) || !ids.every((id) => typeof id === 'string')) {
       res.status(400).json({ error: '`ids` must be an array of task ids.' });
       return;
     }
-    res.json({ tasks: await store.reorder(ids) });
+    res.json({ tasks: await store.reorder(currentUserId(res), ids) });
   } catch (error) {
     next(error);
   }
@@ -236,7 +432,7 @@ app.use(errorHandler);
 
 app.listen(port, () => {
   console.log(`API listening on http://localhost:${port}`);
-  console.log(`Data file: ${dataFile}`);
+  console.log(`Data files: ${dataFile}, ${usersFile}, ${sessionsFile}`);
   if (existsSync(distDir)) {
     console.log(`Serving built UI from ${distDir}`);
   }

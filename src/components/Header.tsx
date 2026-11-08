@@ -1,13 +1,19 @@
 import { useEffect, useState } from 'react';
+import type { User } from '../../shared/types';
 import { MoonIcon, SunIcon } from './icons';
 
 type Theme = 'light' | 'dark';
+
+interface Props {
+  user?: User;
+  onSignOut?: () => void;
+}
 
 function initialTheme(): Theme {
   return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
 }
 
-export function Header() {
+export function Header({ user, onSignOut }: Props) {
   const [theme, setTheme] = useState<Theme>(initialTheme);
 
   const today = new Date().toLocaleDateString(undefined, {
@@ -45,14 +51,26 @@ export function Header() {
         <h1>To-Do</h1>
         <p className="date">{today}</p>
       </div>
-      <button
-        className="icon-btn"
-        type="button"
-        onClick={toggleTheme}
-        aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
-      >
-        {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
-      </button>
+      <div className="header-actions">
+        {user && (
+          <>
+            <span className="account-email" title={user.email}>
+              {user.email}
+            </span>
+            <button className="signout" type="button" onClick={onSignOut}>
+              Sign out
+            </button>
+          </>
+        )}
+        <button
+          className="icon-btn"
+          type="button"
+          onClick={toggleTheme}
+          aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+        >
+          {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
+        </button>
+      </div>
     </header>
   );
 }

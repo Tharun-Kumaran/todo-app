@@ -4,9 +4,15 @@ import path from 'node:path';
 import type { Milestone, Task } from '../shared/types';
 
 interface TaskFile {
-  version: 2;
-  tasks: Task[];
+  version: 3;
+  tasks: StoredTask[];
 }
+
+/**
+ * Stored tasks may predate accounts (`userId: null`). The first account to
+ * register claims them; after that every task belongs to exactly one user.
+ */
+type StoredTask = Omit<Task, 'userId'> & { userId: string | null };
 
 export interface TaskPatch {
   text?: string;
@@ -19,9 +25,12 @@ export interface TaskPatch {
  * In-memory task list with an atomic, serialized JSON file store.
  * Every mutation writes the whole file through a temp file + rename,
  * so a crash can't leave a half-written tasks.json behind.
+ *
+ * All reads and writes are scoped to a user id, so one account can never
+ * see or change another account's tasks.
  */
 export class TaskStore {
-  private tasks: Task[] = [];
+  private tasks: StoredTask[] = [];
   private opChain: Promise<unknown> = Promise.resolve();
   private readonly file: string;
 
@@ -36,7 +45,7 @@ export class TaskStore {
       this.tasks = Array.isArray(parsed.tasks)
         ? parsed.tasks
             .map(normalizeTask)
-            .filter((task): task is Task => task !== null)
+            .filter((task): task is StoredTask => task !== null)
         : [];
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
@@ -53,19 +62,28 @@ export class TaskStore {
     }
   }
 
-  list(): Task[] {
-    return this.tasks.map(cloneTask);
+  listFor(userId: string): Task[] {
+    return this.tasks
+      .filter((task) => task.userId === userId)
+      .map(toTask);
   }
 
-  get(id: string): Task | null {
-    const task = this.tasks.find((item) => item.id === id);
-    return task ? cloneTask(task) : null;
+  countFor(userId: string): number {
+    return this.tasks.filter((task) => task.userId === userId).length;
   }
 
-  add(text: string, dueAt: string | null): Promise<Task> {
+  get(userId: string, id: string): Task | null {
+    const task = this.tasks.find(
+      (item) => item.id === id && item.userId === userId,
+    );
+    return task ? toTask(task) : null;
+  }
+
+  add(userId: string, text: string, dueAt: string | null): Promise<Task> {
     const now = new Date().toISOString();
     const task: Task = {
       id: randomUUID(),
+      userId,
       text,
       done: false,
       createdAt: now,
@@ -75,17 +93,22 @@ export class TaskStore {
       progress: 0,
       milestones: [],
     };
-    return this.mutate((tasks) => ({ next: [task, ...tasks], result: cloneTask(task) }));
+    return this.mutate((tasks) => ({
+      next: [task, ...tasks],
+      result: cloneTask(task),
+    }));
   }
 
-  update(id: string, patch: TaskPatch): Promise<Task | null> {
+  update(userId: string, id: string, patch: TaskPatch): Promise<Task | null> {
     return this.mutate((tasks) => {
-      const index = tasks.findIndex((task) => task.id === id);
+      const index = tasks.findIndex(
+        (task) => task.id === id && task.userId === userId,
+      );
       if (index === -1) return { next: tasks, result: null };
 
       const current = tasks[index];
       const now = new Date().toISOString();
-      const updated: Task = {
+      const updated: StoredTask = {
         ...current,
         ...patch,
         updatedAt: now,
@@ -108,17 +131,20 @@ export class TaskStore {
 
       const next = [...tasks];
       next[index] = updated;
-      return { next, result: cloneTask(updated) };
+      return { next, result: toTask(updated) };
     });
   }
 
   addMilestone(
+    userId: string,
     id: string,
     text: string,
     progress?: number,
   ): Promise<Task | null> {
     return this.mutate((tasks) => {
-      const index = tasks.findIndex((task) => task.id === id);
+      const index = tasks.findIndex(
+        (task) => task.id === id && task.userId === userId,
+      );
       if (index === -1) return { next: tasks, result: null };
 
       const current = tasks[index];
@@ -131,54 +157,96 @@ export class TaskStore {
         createdAt: now,
       };
 
-      const updated: Task = {
+      const updated: StoredTask = {
         ...current,
         progress: value,
         done: value >= 100,
-        completedAt:
-          value >= 100 ? (current.completedAt ?? now) : null,
+        completedAt: value >= 100 ? (current.completedAt ?? now) : null,
         milestones: [...current.milestones, milestone],
         updatedAt: now,
       };
 
       const next = [...tasks];
       next[index] = updated;
-      return { next, result: cloneTask(updated) };
+      return { next, result: toTask(updated) };
     });
   }
 
-  remove(id: string): Promise<boolean> {
+  remove(userId: string, id: string): Promise<boolean> {
     return this.mutate((tasks) => {
-      const next = tasks.filter((task) => task.id !== id);
+      const next = tasks.filter(
+        (task) => !(task.id === id && task.userId === userId),
+      );
       return { next, result: next.length !== tasks.length };
     });
   }
 
-  clearCompleted(): Promise<Task[]> {
+  clearCompleted(userId: string): Promise<Task[]> {
     return this.mutate((tasks) => {
-      const next = tasks.filter((task) => !task.done);
-      return { next, result: next.map(cloneTask) };
+      const next = tasks.filter(
+        (task) => task.userId !== userId || !task.done,
+      );
+      return {
+        next,
+        result: next
+          .filter((task) => task.userId === userId)
+          .map(toTask),
+      };
     });
   }
 
-  reorder(ids: string[]): Promise<Task[]> {
+  reorder(userId: string, ids: string[]): Promise<Task[]> {
     return this.mutate((tasks) => {
-      const byId = new Map(tasks.map((task) => [task.id, task]));
-      const ordered = ids
-        .map((id) => byId.get(id))
-        .filter((task): task is Task => Boolean(task));
-      for (const task of tasks) {
-        if (!ids.includes(task.id)) ordered.push(task);
+      const owned = tasks.filter((task) => task.userId === userId);
+      const byId = new Map(owned.map((task) => [task.id, task]));
+
+      const seen = new Set<string>();
+      const ordered: StoredTask[] = [];
+      for (const id of ids) {
+        const task = byId.get(id);
+        if (task && !seen.has(id)) {
+          seen.add(id);
+          ordered.push(task);
+        }
       }
-      return { next: ordered, result: ordered.map(cloneTask) };
+      for (const task of owned) {
+        if (!seen.has(task.id)) ordered.push(task);
+      }
+
+      // Replace the user's tasks in place so other accounts keep their order.
+      let cursor = 0;
+      const next = tasks.map((task) =>
+        task.userId === userId ? ordered[cursor++] ?? task : task,
+      );
+
+      return {
+        next,
+        result: next
+          .filter((task) => task.userId === userId)
+          .map(toTask),
+      };
+    });
+  }
+
+  /** Give tasks created before accounts existed to the first registered user. */
+  async claimUnowned(userId: string): Promise<number> {
+    if (!this.tasks.some((task) => task.userId === null)) return 0;
+    return this.mutate((tasks) => {
+      let claimed = 0;
+      const next = tasks.map((task) => {
+        if (task.userId !== null) return task;
+        claimed += 1;
+        return { ...task, userId };
+      });
+      return { next, result: claimed };
     });
   }
 
   private mutate<T>(
-    fn: (tasks: Task[]) => { next: Task[]; result: T },
+    fn: (tasks: StoredTask[]) => { next: StoredTask[]; result: T },
   ): Promise<T> {
     const run = this.opChain.then(async () => {
-      const { next, result } = fn(this.tasks.map(cloneTask));
+      const { next, result } = fn(this.tasks.map(cloneStoredTask));
       await this.persist(next);
       this.tasks = next;
       return result;
@@ -190,10 +258,10 @@ export class TaskStore {
     return run;
   }
 
-  private async persist(tasks: Task[]): Promise<void> {
+  private async persist(tasks: StoredTask[]): Promise<void> {
     await fs.mkdir(path.dirname(this.file), { recursive: true });
     const temp = `${this.file}.${process.pid}.tmp`;
-    const body: TaskFile = { version: 2, tasks };
+    const body: TaskFile = { version: 3, tasks };
     await fs.writeFile(temp, `${JSON.stringify(body, null, 2)}\n`, 'utf8');
     await fs.rename(temp, this.file);
   }
@@ -207,11 +275,26 @@ function cloneTask(task: Task): Task {
   return { ...task, milestones: task.milestones.map((entry) => ({ ...entry })) };
 }
 
+function cloneStoredTask(task: StoredTask): StoredTask {
+  return { ...task, milestones: task.milestones.map((entry) => ({ ...entry })) };
+}
+
+function toTask(task: StoredTask): Task {
+  if (task.userId === null) {
+    throw new Error('Refusing to return a task that has no owner.');
+  }
+  return {
+    ...task,
+    userId: task.userId,
+    milestones: task.milestones.map((entry) => ({ ...entry })),
+  };
+}
+
 /**
  * Accepts tasks written by any version of the store and fills in fields
- * added later (deadlines, progress, milestones) with safe defaults.
+ * added later (accounts, deadlines, progress, milestones) with safe defaults.
  */
-function normalizeTask(value: unknown): Task | null {
+function normalizeTask(value: unknown): StoredTask | null {
   if (!value || typeof value !== 'object') return null;
   const task = value as Record<string, unknown>;
 
@@ -234,6 +317,10 @@ function normalizeTask(value: unknown): Task | null {
 
   return {
     id: task.id,
+    userId:
+      typeof task.userId === 'string' && task.userId.length > 0
+        ? task.userId
+        : null,
     text: task.text,
     done: task.done,
     createdAt: task.createdAt,

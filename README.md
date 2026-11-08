@@ -1,14 +1,15 @@
 # To-Do
 
 A to-do app built with **React + Vite + TypeScript**, backed by an **Express**
-API that persists tasks to a local JSON file.
+API that persists tasks to a local JSON file. Each email/password account has
+its own private task list.
 
 ## Stack
 
 - React 19 + TypeScript
 - Vite (dev server, HMR, production build)
 - Express 5 API
-- Atomic JSON file storage (`server/data/tasks.json`)
+- Atomic JSON file storage for tasks, accounts, and sessions (`server/data/`)
 
 ## Getting started
 
@@ -47,29 +48,63 @@ npm start
 
 ## Data
 
-Tasks live in `server/data/tasks.json`. The file is created on first run and is
-git-ignored because it contains your personal list. Writes go through a temp
-file and an atomic rename, and mutations are serialized to avoid lost updates.
+Runtime data lives in `server/data/` and is git-ignored because it is personal:
 
-Each task stores `dueAt`, `progress`, `completedAt`, and a `milestones` array.
-`completedAt` is stamped when a task becomes complete and cleared when it is
-reopened. Files written by older versions (without those fields) are migrated
-on load: deadlines and completion timestamps default to `null` (with completed
+| File            | Contents                                                 |
+| --------------- | -------------------------------------------------------- |
+| `tasks.json`    | Tasks, each mapped to a `userId`                         |
+| `users.json`    | Accounts: id, email, salt, and scrypt password hash      |
+| `sessions.json` | Active sessions as SHA-256 token hashes with expiry      |
+
+Writes go through a temp file and an atomic rename, and mutations are
+serialized to avoid lost updates.
+
+Each task stores `userId`, `dueAt`, `progress`, `completedAt`, and a
+`milestones` array. `completedAt` is stamped when a task becomes complete and
+cleared when it is reopened. Files written by older versions are migrated on
+load: deadlines and completion timestamps default to `null` (with completed
 tasks using `updatedAt` as their completion time), completed tasks to 100%,
-everything else to 0%, and the milestone list to empty.
+everything else to 0%, and the milestone list to empty. Tasks created before
+accounts existed have no `userId`; the first account to register claims them.
 
 Overrides:
 
-| Variable         | Default                     | Purpose                    |
-| ---------------- | --------------------------- | -------------------------- |
-| `PORT`           | `3001`                      | API/UI port in production  |
-| `TODO_DATA_FILE` | `server/data/tasks.json`    | Location of the JSON store |
-| `VITE_API_BASE_URL` | same-origin `/api`      | API URL for a remote setup |
+| Variable              | Default                  | Purpose                              |
+| --------------------- | ------------------------ | ------------------------------------ |
+| `PORT`                | `3001`                   | API/UI port in production            |
+| `TODO_DATA_FILE`      | `server/data/tasks.json` | Location of the task store           |
+| `TODO_USERS_FILE`     | `server/data/users.json` | Location of the account store        |
+| `TODO_SESSIONS_FILE`  | `server/data/sessions.json` | Location of the session store     |
+| `TODO_SESSION_DAYS`   | `30`                     | Session lifetime (1–365 days)        |
+| `TODO_COOKIE_SAMESITE`| `lax`                    | Set to `none` for cross-site cookies |
+| `TODO_COOKIE_SECURE`  | auto over HTTPS          | Force the `Secure` cookie flag       |
+| `TODO_CORS_ORIGIN`    | unset                    | Allow one browser origin with cookies|
+| `VITE_API_BASE_URL`   | same-origin `/api`       | API URL for a remote setup           |
+
+## Authentication
+
+Accounts use email + password. Passwords are salted and hashed with scrypt
+(`node:crypto`); plaintext passwords are never stored or returned. Signing in
+creates an opaque random session token in an `HttpOnly`, `SameSite=Lax` cookie
+(`Secure` over HTTPS). Only a SHA-256 hash of each token is saved, and sessions
+expire after 30 days by default.
+
+Every `/api/tasks` route requires a session and is scoped to that user, so one
+account can never read, edit, complete, reorder, or delete another account's
+tasks. The first account to register adopts tasks written before accounts were
+introduced.
 
 ## API
 
+All `/api/tasks` routes require the session cookie and only affect the
+signed-in user's tasks. Unauthenticated requests get `401`.
+
 | Method   | Path                         | Body                    | Result              |
 | -------- | ---------------------------- | ----------------------- | ------------------- |
+| `POST`   | `/api/auth/register`         | `{ email, password }`   | `{ user }` (201)    |
+| `POST`   | `/api/auth/login`            | `{ email, password }`   | `{ user }`          |
+| `GET`    | `/api/auth/me`               | —                       | `{ user }`          |
+| `POST`   | `/api/auth/logout`           | —                       | 204                 |
 | `GET`    | `/api/tasks`                 | —                       | `{ tasks }`         |
 | `GET`    | `/api/tasks/:id`             | —                       | `{ task }`          |
 | `POST`   | `/api/tasks`                 | `{ text, dueAt? }`      | `{ task }` (201)    |
@@ -88,10 +123,16 @@ to GitHub Pages on every push to `main`.
 GitHub Pages only serves static files, so the local JSON API is **not**
 available there. The deployed page will show a connection error until you host
 the Express server elsewhere and set `VITE_API_BASE_URL` to its URL at build
-time.
+time. For a cross-origin API, also set `TODO_CORS_ORIGIN` to the Pages origin;
+if the cookie must cross sites, set `TODO_COOKIE_SAMESITE=none` and serve the
+API over HTTPS so the `Secure` cookie is accepted.
 
 ## Features
 
+- Email + password accounts with salted scrypt hashes and `HttpOnly` session
+  cookies
+- Private per-user task lists, with the signed-in email and sign-out in the
+  header
 - Add, complete, edit (double-click), and delete tasks
 - Optional deadline (date + time) when creating a task, shown as a relative
   badge (overdue / due today / due tomorrow / date)
