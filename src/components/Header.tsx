@@ -7,13 +7,14 @@ type Theme = 'light' | 'dark';
 interface Props {
   user?: User;
   onSignOut?: () => void;
+  onToggleSidebar?: () => void;
 }
 
 function initialTheme(): Theme {
   return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
 }
 
-export function Header({ user, onSignOut }: Props) {
+export function Header({ user, onSignOut, onToggleSidebar }: Props) {
   const [theme, setTheme] = useState<Theme>(initialTheme);
 
   const today = new Date().toLocaleDateString(undefined, {
@@ -47,9 +48,21 @@ export function Header({ user, onSignOut }: Props) {
 
   return (
     <header className="header">
-      <div>
-        <h1>To-Do</h1>
-        <p className="date">{today}</p>
+      <div className="header-left">
+        {onToggleSidebar && (
+          <button
+            type="button"
+            className="sidebar-toggle-btn"
+            aria-label="Toggle workspace sidebar"
+            onClick={onToggleSidebar}
+          >
+            ☰
+          </button>
+        )}
+        <div>
+          <h1>To-Do</h1>
+          <p className="date">{today}</p>
+        </div>
       </div>
       <div className="header-actions">
         {user && (
@@ -66,7 +79,9 @@ export function Header({ user, onSignOut }: Props) {
           className="icon-btn"
           type="button"
           onClick={toggleTheme}
-          aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+          aria-label={
+            theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'
+          }
         >
           {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
         </button>

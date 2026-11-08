@@ -2,8 +2,11 @@ import { useEffect, useMemo, useState } from 'react';
 import type { Filter, Task, User } from '../shared/types';
 import { useAuth } from './hooks/useAuth';
 import { useTasks } from './hooks/useTasks';
+import { useTeams } from './hooks/useTeams';
 import { AuthScreen } from './components/AuthScreen';
 import { Header } from './components/Header';
+import { Sidebar } from './components/Sidebar';
+import { TeamHeader } from './components/TeamHeader';
 import { TaskForm } from './components/TaskForm';
 import { TaskItem } from './components/TaskItem';
 import { EmptyState } from './components/EmptyState';
@@ -52,6 +55,15 @@ interface TodoAppProps {
 }
 
 function TodoApp({ user, onSignOut }: TodoAppProps) {
+  const { teams, createNewTeam, inviteMember, removeMember } = useTeams();
+  const [activeTeamId, setActiveTeamId] = useState<string | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  const selectedTeam = useMemo(
+    () => (activeTeamId ? teams.find((t) => t.id === activeTeamId) ?? null : null),
+    [teams, activeTeamId],
+  );
+
   const {
     tasks,
     loading,
@@ -60,6 +72,7 @@ function TodoApp({ user, onSignOut }: TodoAppProps) {
     addTask,
     toggleTask,
     editTask,
+    setAssignee,
     setProgress,
     setDue,
     addMilestone,
@@ -67,12 +80,11 @@ function TodoApp({ user, onSignOut }: TodoAppProps) {
     clearDone,
     reorder,
     dismissError,
-  } = useTasks();
+  } = useTasks(activeTeamId);
 
   const [filter, setFilter] = useState<Filter>('all');
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
-  // Re-evaluate overdue tasks while the app stays open.
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -114,7 +126,8 @@ function TodoApp({ user, onSignOut }: TodoAppProps) {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       const typing =
-        target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement;
       if (event.key === '/' && !typing) {
         event.preventDefault();
         document.getElementById('new-task')?.focus();
@@ -154,77 +167,119 @@ function TodoApp({ user, onSignOut }: TodoAppProps) {
   }
 
   return (
-    <main className="app">
-      <Header user={user} onSignOut={onSignOut} />
-      <ProgressBar percent={percent} />
+    <div className="workspace-layout">
+      <Sidebar
+        user={user}
+        teams={teams}
+        activeTeamId={activeTeamId}
+        personalPendingCount={activeTeamId === null ? pending : 0}
+        isOpen={sidebarOpen}
+        onSelectPersonal={() => setActiveTeamId(null)}
+        onSelectTeam={(teamId) => setActiveTeamId(teamId)}
+        onCreateTeam={createNewTeam}
+        onClose={() => setSidebarOpen(false)}
+      />
 
-      {error && (
-        <div className="banner" role="alert">
-          <p>{error}</p>
-          <button type="button" onClick={() => void refresh()}>
-            Retry
-          </button>
-          <button type="button" onClick={dismissError}>
-            Dismiss
-          </button>
-        </div>
-      )}
-
-      <TaskForm onAdd={addTask} />
-
-      {loading ? (
-        <div className="loading">
-          <span className="spinner" aria-hidden="true" />
-          Loading tasks…
-        </div>
-      ) : visible.length === 0 ? (
-        <EmptyState filter={filter} total={total} />
-      ) : (
-        <ul className="tasks" aria-label="Tasks">
-          {visible.map((task) => (
-            <TaskItem
-              key={task.id}
-              task={task}
-              draggable={canReorder}
-              dragging={draggingId === task.id}
-              dragOver={dragOverId === task.id && draggingId !== task.id}
-              onToggle={() => void toggleTask(task)}
-              onEdit={(text) => editTask(task.id, text)}
-              onProgress={(progress) => setProgress(task, progress)}
-              onDue={(dueAt) => setDue(task, dueAt)}
-              onMilestone={(text, progress) => addMilestone(task, text, progress)}
-              onDelete={() => void removeTask(task.id)}
-              onDragStart={() => setDraggingId(task.id)}
-              onDragOver={() => setDragOverId(task.id)}
-              onDrop={() => handleDrop(task.id)}
-              onDragEnd={resetDrag}
-            />
-          ))}
-        </ul>
-      )}
-
-      <footer className="footer">
-        <span className="count" aria-live="polite">
-          {countLabel(total, pending, overdue)}
-        </span>
-        <Filters
-          value={filter}
-          onChange={setFilter}
-          total={total}
-          pending={pending}
-          overdue={overdue}
-          done={done}
+      <main className="app main-workspace">
+        <Header
+          user={user}
+          onSignOut={onSignOut}
+          onToggleSidebar={() => setSidebarOpen((v) => !v)}
         />
-        <button
-          className="clear"
-          type="button"
-          onClick={() => void clearDone()}
-          disabled={done === 0}
-        >
-          Clear done
-        </button>
-      </footer>
-    </main>
+
+        {selectedTeam ? (
+          <TeamHeader
+            team={selectedTeam}
+            currentUser={user}
+            onInviteMember={(email) => inviteMember(selectedTeam.id, email)}
+            onRemoveMember={(email) => removeMember(selectedTeam.id, email)}
+          />
+        ) : (
+          <div className="personal-header-banner">
+            <div className="banner-text">
+              <h2>👤 My Personal Tasks</h2>
+              <p>Private to you. Teammates cannot see personal tasks.</p>
+            </div>
+          </div>
+        )}
+
+        <ProgressBar percent={percent} />
+
+        {error && (
+          <div className="banner" role="alert">
+            <p>{error}</p>
+            <button type="button" onClick={() => void refresh()}>
+              Retry
+            </button>
+            <button type="button" onClick={dismissError}>
+              Dismiss
+            </button>
+          </div>
+        )}
+
+        <TaskForm
+          onAdd={addTask}
+          teamMembers={selectedTeam ? selectedTeam.members : undefined}
+        />
+
+        {loading ? (
+          <div className="loading">
+            <span className="spinner" aria-hidden="true" />
+            Loading tasks…
+          </div>
+        ) : visible.length === 0 ? (
+          <EmptyState filter={filter} total={total} />
+        ) : (
+          <ul className="tasks" aria-label="Tasks">
+            {visible.map((task) => (
+              <TaskItem
+                key={task.id}
+                task={task}
+                draggable={canReorder}
+                dragging={draggingId === task.id}
+                dragOver={dragOverId === task.id && draggingId !== task.id}
+                teamMembers={selectedTeam ? selectedTeam.members : undefined}
+                onToggle={() => void toggleTask(task)}
+                onEdit={(text) => editTask(task.id, text)}
+                onAssignee={(email) => setAssignee(task, email)}
+                onProgress={(progress) => setProgress(task, progress)}
+                onDue={(dueAt) => setDue(task, dueAt)}
+                onMilestone={(text, progress) =>
+                  addMilestone(task, text, progress)
+                }
+                onDelete={() => void removeTask(task.id)}
+                onDragStart={() => setDraggingId(task.id)}
+                onDragOver={() => setDragOverId(task.id)}
+                onDrop={() => handleDrop(task.id)}
+                onDragEnd={resetDrag}
+              />
+            ))}
+          </ul>
+        )}
+
+        <footer className="footer">
+          <span className="count" aria-live="polite">
+            {countLabel(total, pending, overdue)}
+          </span>
+          <Filters
+            value={filter}
+            onChange={setFilter}
+            total={total}
+            pending={pending}
+            overdue={overdue}
+            done={done}
+          />
+          <button
+            className="clear"
+            type="button"
+            onClick={() => void clearDone()}
+            disabled={done === 0}
+          >
+            Clear done
+          </button>
+        </footer>
+      </main>
+    </div>
   );
 }
 

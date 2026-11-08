@@ -113,6 +113,12 @@ export class UserStore {
     return user ? toPublicUser(user) : null;
   }
 
+  findByEmail(email: string): User | null {
+    const normalized = email.toLowerCase().trim();
+    const user = this.users.find((record) => record.email === normalized);
+    return user ? toPublicUser(user) : null;
+  }
+
   /** Create an account, or return null when the email is already registered. */
   create(email: string, password: string): Promise<User | null> {
     return this.mutate(async (users) => {

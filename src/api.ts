@@ -1,4 +1,4 @@
-import type { Task, User } from '../shared/types';
+import type { Task, Team, User } from '../shared/types';
 
 const base = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/+$/, '');
 
@@ -59,6 +59,7 @@ export interface TaskPatch {
   done?: boolean;
   dueAt?: string | null;
   progress?: number;
+  assigneeEmail?: string | null;
 }
 
 // --- Authentication -------------------------------------------------------
@@ -90,16 +91,70 @@ export function logout(): Promise<void> {
   return request<void>('/api/auth/logout', { method: 'POST' });
 }
 
-// --- Tasks ----------------------------------------------------------------
+// --- Teams ----------------------------------------------------------------
 
-export function fetchTasks(): Promise<Task[]> {
-  return request<{ tasks: Task[] }>('/api/tasks').then((data) => data.tasks);
+export function fetchTeams(): Promise<Team[]> {
+  return request<{ teams: Team[] }>('/api/teams').then((data) => data.teams);
 }
 
-export function createTask(text: string, dueAt: string | null = null): Promise<Task> {
+export function createTeam(name: string): Promise<Team> {
+  return request<{ team: Team }>('/api/teams', {
+    method: 'POST',
+    body: JSON.stringify({ name }),
+  }).then((data) => data.team);
+}
+
+export function fetchTeam(id: string): Promise<Team> {
+  return request<{ team: Team }>(`/api/teams/${encodeURIComponent(id)}`).then(
+    (data) => data.team,
+  );
+}
+
+export function addTeamMember(teamId: string, email: string): Promise<Team> {
+  return request<{ team: Team }>(
+    `/api/teams/${encodeURIComponent(teamId)}/members`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    },
+  ).then((data) => data.team);
+}
+
+export function removeTeamMember(
+  teamId: string,
+  email: string,
+): Promise<Team> {
+  return request<{ team: Team }>(
+    `/api/teams/${encodeURIComponent(teamId)}/members/${encodeURIComponent(email)}`,
+    {
+      method: 'DELETE',
+    },
+  ).then((data) => data.team);
+}
+
+// --- Tasks ----------------------------------------------------------------
+
+export function fetchTasks(teamId?: string | null): Promise<Task[]> {
+  const query = teamId ? `?teamId=${encodeURIComponent(teamId)}` : '';
+  return request<{ tasks: Task[] }>(`/api/tasks${query}`).then(
+    (data) => data.tasks,
+  );
+}
+
+export function createTask(
+  text: string,
+  dueAt: string | null = null,
+  teamId?: string | null,
+  assigneeEmail?: string | null,
+): Promise<Task> {
   return request<{ task: Task }>('/api/tasks', {
     method: 'POST',
-    body: JSON.stringify({ text, dueAt }),
+    body: JSON.stringify({
+      text,
+      dueAt,
+      teamId: teamId || null,
+      assigneeEmail: assigneeEmail || null,
+    }),
   }).then((data) => data.task);
 }
 
@@ -113,7 +168,7 @@ export function updateTask(id: string, patch: TaskPatch): Promise<Task> {
 export function addMilestone(
   id: string,
   text: string,
-  progress: number,
+  progress?: number,
 ): Promise<Task> {
   return request<{ task: Task }>(
     `/api/tasks/${encodeURIComponent(id)}/milestones`,
@@ -130,14 +185,19 @@ export function deleteTask(id: string): Promise<void> {
   });
 }
 
-export function clearCompleted(): Promise<Task[]> {
-  return request<{ tasks: Task[] }>('/api/tasks/clear-completed', {
+export function clearCompleted(teamId?: string | null): Promise<Task[]> {
+  const query = teamId ? `?teamId=${encodeURIComponent(teamId)}` : '';
+  return request<{ tasks: Task[] }>(`/api/tasks/clear-completed${query}`, {
     method: 'POST',
   }).then((data) => data.tasks);
 }
 
-export function reorderTasks(ids: string[]): Promise<Task[]> {
-  return request<{ tasks: Task[] }>('/api/tasks/order', {
+export function reorderTasks(
+  ids: string[],
+  teamId?: string | null,
+): Promise<Task[]> {
+  const query = teamId ? `?teamId=${encodeURIComponent(teamId)}` : '';
+  return request<{ tasks: Task[] }>(`/api/tasks/order${query}`, {
     method: 'PUT',
     body: JSON.stringify({ ids }),
   }).then((data) => data.tasks);

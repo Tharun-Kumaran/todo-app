@@ -5,7 +5,7 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from 'react';
-import type { Task } from '../../shared/types';
+import type { Task, TeamMember } from '../../shared/types';
 import {
   describeDue,
   formatDateTime,
@@ -20,8 +20,10 @@ interface Props {
   draggable: boolean;
   dragging: boolean;
   dragOver: boolean;
+  teamMembers?: TeamMember[];
   onToggle: () => void;
   onEdit: (text: string) => Promise<boolean>;
+  onAssignee?: (email: string | null) => Promise<boolean>;
   onProgress: (progress: number) => Promise<boolean>;
   onDue: (dueAt: string | null) => Promise<boolean>;
   onMilestone: (text: string, progress: number) => Promise<boolean>;
@@ -37,8 +39,10 @@ export function TaskItem({
   draggable,
   dragging,
   dragOver,
+  teamMembers,
   onToggle,
   onEdit,
+  onAssignee,
   onProgress,
   onDue,
   onMilestone,
@@ -58,6 +62,7 @@ export function TaskItem({
   const [milestoneText, setMilestoneText] = useState('');
   const [milestoneProgress, setMilestoneProgress] = useState(task.progress);
   const [milestoneBusy, setMilestoneBusy] = useState(false);
+  const [assigneeBusy, setAssigneeBusy] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const editingRef = useRef(false);
   const cancelRef = useRef(false);
@@ -98,36 +103,27 @@ export function TaskItem({
 
   function closeEditor() {
     editingRef.current = false;
+    cancelRef.current = false;
     setEditing(false);
   }
 
-  async function commitText() {
-    if (!editingRef.current) return;
-    editingRef.current = false;
-    setEditing(false);
-
+  async function commitEdit() {
+    if (!editingRef.current || cancelRef.current) return;
     const value = draft.trim();
     if (!value || value === task.text) {
       setDraft(task.text);
+      closeEditor();
       return;
     }
-
     const saved = await onEdit(value);
-    if (!saved) setDraft(task.text);
-  }
-
-  function handleBlur() {
-    if (cancelRef.current) {
-      cancelRef.current = false;
-      return;
-    }
-    void commitText();
+    if (saved) closeEditor();
+    else setDraft(task.text);
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLInputElement>) {
     if (event.key === 'Enter') {
       event.preventDefault();
-      void commitText();
+      void commitEdit();
     } else if (event.key === 'Escape') {
       event.preventDefault();
       cancelRef.current = true;
@@ -136,13 +132,16 @@ export function TaskItem({
     }
   }
 
-  async function commitProgress(value: number) {
-    const next = Math.min(100, Math.max(0, Math.round(value)));
-    setProgressDraft(next);
-    if (next === task.progress) return;
+  function handleBlur() {
+    if (cancelRef.current) return;
+    void commitEdit();
+  }
 
+  async function commitProgress(value: number) {
+    const clamped = Math.min(100, Math.max(0, Math.round(value)));
+    if (clamped === task.progress) return;
     setProgressBusy(true);
-    const saved = await onProgress(next);
+    const saved = await onProgress(clamped);
     setProgressBusy(false);
     if (!saved) setProgressDraft(task.progress);
   }
@@ -161,6 +160,13 @@ export function TaskItem({
     const saved = await onDue(null);
     setDueBusy(false);
     if (!saved) setDueDraft(toDateTimeLocal(task.dueAt));
+  }
+
+  async function handleAssigneeChange(email: string) {
+    if (!onAssignee) return;
+    setAssigneeBusy(true);
+    await onAssignee(email || null);
+    setAssigneeBusy(false);
   }
 
   async function submitMilestone(event: FormEvent<HTMLFormElement>) {
@@ -243,6 +249,15 @@ export function TaskItem({
           </span>
         )}
 
+        {task.assigneeEmail && (
+          <span
+            className="assignee-badge"
+            title={`Assigned to ${task.assigneeEmail}`}
+          >
+            👤 {task.assigneeEmail.split('@')[0]}
+          </span>
+        )}
+
         {due && !editing && (
           <span className={`due-badge tone-${due.tone}`} title={due.title}>
             <CalendarIcon />
@@ -264,7 +279,10 @@ export function TaskItem({
           </span>
           <span className="mini-value">{task.progress}%</span>
           {task.milestones.length > 0 && (
-            <span className="mini-count" title={`${task.milestones.length} progress updates`}>
+            <span
+              className="mini-count"
+              title={`${task.milestones.length} progress updates`}
+            >
               {task.milestones.length}
             </span>
           )}
@@ -298,7 +316,9 @@ export function TaskItem({
                 step={5}
                 value={progressDraft}
                 aria-label="Task progress"
-                onChange={(event) => setProgressDraft(Number(event.target.value))}
+                onChange={(event) =>
+                  setProgressDraft(Number(event.target.value))
+                }
                 onPointerUp={() => void commitProgress(progressDraft)}
                 onKeyUp={() => void commitProgress(progressDraft)}
                 disabled={progressBusy}
@@ -316,7 +336,7 @@ export function TaskItem({
                   type="button"
                   className="ghost-btn"
                   onClick={() => void commitProgress(100)}
-                  disabled={progressBusy || task.progress === 100}
+                  disabled={progressBusy || task.done}
                 >
                   Mark 100%
                 </button>
@@ -326,13 +346,17 @@ export function TaskItem({
             <section className="detail-card">
               <div className="detail-head">
                 <h3>Deadline</h3>
+                <span className={`detail-count tone-${due?.tone ?? 'future'}`}>
+                  {due ? due.label : 'None'}
+                </span>
               </div>
               <input
                 type="datetime-local"
                 className="due-input"
                 value={dueDraft}
-                aria-label="Edit deadline"
+                aria-label="Task deadline"
                 onChange={(event) => setDueDraft(event.target.value)}
+                disabled={dueBusy}
               />
               <div className="detail-actions">
                 <button
@@ -385,6 +409,34 @@ export function TaskItem({
                 <dt>Deadline</dt>
                 <dd>{task.dueAt ? formatDateTime(task.dueAt) : 'None'}</dd>
               </div>
+              {task.creatorEmail && (
+                <div>
+                  <dt>Created by</dt>
+                  <dd>{task.creatorEmail}</dd>
+                </div>
+              )}
+              {teamMembers && (
+                <div>
+                  <dt>Assignee</dt>
+                  <dd>
+                    <select
+                      className="inline-assignee-select"
+                      value={task.assigneeEmail || ''}
+                      disabled={assigneeBusy}
+                      onChange={(e) =>
+                        void handleAssigneeChange(e.target.value)
+                      }
+                    >
+                      <option value="">Unassigned</option>
+                      {teamMembers.map((m) => (
+                        <option key={m.email} value={m.email}>
+                          {m.email}
+                        </option>
+                      ))}
+                    </select>
+                  </dd>
+                </div>
+              )}
             </dl>
           </section>
 
@@ -398,7 +450,10 @@ export function TaskItem({
               </span>
             </div>
 
-            <form className="milestone-form" onSubmit={(event) => void submitMilestone(event)}>
+            <form
+              className="milestone-form"
+              onSubmit={(event) => void submitMilestone(event)}
+            >
               <input
                 className="milestone-input"
                 value={milestoneText}

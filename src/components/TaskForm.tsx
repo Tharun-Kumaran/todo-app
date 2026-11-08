@@ -1,9 +1,15 @@
 import { useMemo, useState, type FormEvent } from 'react';
 import { composeDueAt, describeDue } from '../format';
 import { CalendarIcon, PlusIcon } from './icons';
+import type { TeamMember } from '../../shared/types';
 
 interface Props {
-  onAdd: (text: string, dueAt: string | null) => Promise<boolean>;
+  onAdd: (
+    text: string,
+    dueAt: string | null,
+    assigneeEmail?: string | null,
+  ) => Promise<boolean>;
+  teamMembers?: TeamMember[];
 }
 
 function todayValue(): string {
@@ -12,10 +18,11 @@ function todayValue(): string {
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
 }
 
-export function TaskForm({ onAdd }: Props) {
+export function TaskForm({ onAdd, teamMembers }: Props) {
   const [text, setText] = useState('');
   const [dueDate, setDueDate] = useState('');
   const [dueTime, setDueTime] = useState('');
+  const [assigneeEmail, setAssigneeEmail] = useState('');
   const [shake, setShake] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -34,12 +41,17 @@ export function TaskForm({ onAdd }: Props) {
     }
 
     setBusy(true);
-    const added = await onAdd(value, composeDueAt(dueDate, dueTime));
+    const added = await onAdd(
+      value,
+      composeDueAt(dueDate, dueTime),
+      assigneeEmail || null,
+    );
     setBusy(false);
     if (added) {
       setText('');
       setDueDate('');
       setDueTime('');
+      setAssigneeEmail('');
     }
   }
 
@@ -60,7 +72,11 @@ export function TaskForm({ onAdd }: Props) {
           value={text}
           onChange={(event) => setText(event.target.value)}
           maxLength={500}
-          placeholder="What needs to be done?"
+          placeholder={
+            teamMembers
+              ? 'Add a team task for the project…'
+              : 'What needs to be done?'
+          }
           aria-label="New task"
           autoFocus
         />
@@ -94,9 +110,32 @@ export function TaskForm({ onAdd }: Props) {
           {preview ? preview.label : dueDate ? 'Defaults to 11:59 PM' : 'Optional'}
         </span>
         {(dueDate || dueTime) && (
-          <button type="button" className="clear-deadline" onClick={clearDeadline}>
+          <button
+            type="button"
+            className="clear-deadline"
+            onClick={clearDeadline}
+          >
             Clear
           </button>
+        )}
+
+        {teamMembers && teamMembers.length > 0 && (
+          <div className="task-assignee-select-wrap">
+            <label htmlFor="task-assignee">Assign to:</label>
+            <select
+              id="task-assignee"
+              className="task-assignee-select"
+              value={assigneeEmail}
+              onChange={(e) => setAssigneeEmail(e.target.value)}
+            >
+              <option value="">Unassigned</option>
+              {teamMembers.map((m) => (
+                <option key={m.email} value={m.email}>
+                  {m.email} {m.role === 'owner' ? '(Host)' : ''}
+                </option>
+              ))}
+            </select>
+          </div>
         )}
       </div>
     </form>

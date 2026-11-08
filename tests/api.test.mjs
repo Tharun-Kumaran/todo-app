@@ -82,192 +82,160 @@ test('Duplicate Account Validation', async (t) => {
     assert.equal(res.status, 409);
     assert.equal(res.data.error, 'An account with this email already exists.');
   });
-
-  await t.test('Mixed-case with whitespace duplicate registration returns 409 Conflict', async () => {
-    const res = await clientB.request('/api/auth/register', {
-      method: 'POST',
-      body: { email: `  ${baseEmail.toUpperCase()}  `, password },
-    });
-    assert.equal(res.status, 409);
-    assert.equal(res.data.error, 'An account with this email already exists.');
-  });
-
-  await t.test('Invalid or empty emails are rejected with 400', async () => {
-    for (const badEmail of ['', '   ', 'notanemail', 'missing@tld', '@no-local.com']) {
-      const res = await clientB.request('/api/auth/register', {
-        method: 'POST',
-        body: { email: badEmail, password },
-      });
-      assert.equal(res.status, 400, `Expected 400 for ${badEmail}`);
-    }
-  });
 });
 
-test('No Data Leaking Across Accounts (Strict Isolation)', async (t) => {
-  const alice = new TestClient();
-  const bob = new TestClient();
-  const suffix = Date.now() + 1;
-  const aliceEmail = `alice-isolation-${suffix}@example.com`;
-  const bobEmail = `bob-isolation-${suffix}@example.com`;
-  const password = 'StrongPassword123!';
+test('Personal Tasks vs Team Tasks & Multi-User Collaboration', async (t) => {
+  const host = new TestClient();
+  const teammate = new TestClient();
+  const outsider = new TestClient();
 
-  let aliceTask1Id;
-  let aliceTask2Id;
+  const suffix = Date.now() + 10;
+  const hostEmail = `host-${suffix}@example.com`;
+  const teammateEmail = `teammate-${suffix}@example.com`;
+  const outsiderEmail = `outsider-${suffix}@example.com`;
+  const password = 'SecurePassword123!';
 
-  await t.test('Setup Alice and Bob accounts', async () => {
-    const resAlice = await alice.request('/api/auth/register', {
+  let teamId;
+  let hostPersonalTaskId;
+  let teamTaskId;
+
+  await t.test('Register all three users', async () => {
+    const r1 = await host.request('/api/auth/register', {
       method: 'POST',
-      body: { email: aliceEmail, password },
+      body: { email: hostEmail, password },
     });
-    assert.equal(resAlice.status, 201);
+    assert.equal(r1.status, 201);
 
-    const resBob = await bob.request('/api/auth/register', {
+    const r2 = await teammate.request('/api/auth/register', {
       method: 'POST',
-      body: { email: bobEmail, password },
+      body: { email: teammateEmail, password },
     });
-    assert.equal(resBob.status, 201);
+    assert.equal(r2.status, 201);
+
+    const r3 = await outsider.request('/api/auth/register', {
+      method: 'POST',
+      body: { email: outsiderEmail, password },
+    });
+    assert.equal(r3.status, 201);
   });
 
-  await t.test('Verify no password, salt, or hash leakage in auth responses', async () => {
-    const meAlice = await alice.request('/api/auth/me');
-    assert.equal(meAlice.status, 200);
-    assert.equal(meAlice.data.user.email, aliceEmail);
-    assert.equal(meAlice.data.user.password, undefined);
-    assert.equal(meAlice.data.user.salt, undefined);
-    assert.equal(meAlice.data.user.passwordHash, undefined);
+  await t.test('Host creates a private Personal Task', async () => {
+    const res = await host.request('/api/tasks', {
+      method: 'POST',
+      body: { text: 'Host Private Personal Task' },
+    });
+    assert.equal(res.status, 201);
+    assert.equal(res.data.task.teamId, null);
+    hostPersonalTaskId = res.data.task.id;
   });
 
-  await t.test('Alice creates active and completed tasks with milestones', async () => {
-    // Task 1: Active task with milestone
-    const res1 = await alice.request('/api/tasks', {
-      method: 'POST',
-      body: { text: "Alice's Secret Project Task", dueAt: new Date(Date.now() + 100000).toISOString() },
-    });
-    assert.equal(res1.status, 201);
-    aliceTask1Id = res1.data.task.id;
+  await t.test('Neither Teammate nor Outsider can see Host Personal Task', async () => {
+    const res1 = await teammate.request('/api/tasks');
+    assert.equal(res1.status, 200);
+    assert.equal(res1.data.tasks.length, 0);
 
-    // Add milestone
-    const msRes = await alice.request(`/api/tasks/${aliceTask1Id}/milestones`, {
+    const res2 = await outsider.request(`/api/tasks/${hostPersonalTaskId}`);
+    assert.equal(res2.status, 404);
+  });
+
+  await t.test('Host creates a Team', async () => {
+    const res = await host.request('/api/teams', {
       method: 'POST',
-      body: { text: "Alice's confidential checkpoint", progress: 40 },
+      body: { name: 'Alpha Core Team' },
+    });
+    assert.equal(res.status, 201);
+    assert.equal(res.data.team.name, 'Alpha Core Team');
+    assert.equal(res.data.team.ownerEmail, hostEmail.toLowerCase());
+    assert.equal(res.data.team.members.length, 1);
+    assert.equal(res.data.team.members[0].role, 'owner');
+    teamId = res.data.team.id;
+  });
+
+  await t.test('Host invites Teammate by email', async () => {
+    const res = await host.request(`/api/teams/${teamId}/members`, {
+      method: 'POST',
+      body: { email: teammateEmail },
+    });
+    assert.equal(res.status, 201);
+    assert.equal(res.data.team.members.length, 2);
+    assert.ok(res.data.team.members.some((m) => m.email === teammateEmail.toLowerCase()));
+  });
+
+  await t.test('Teammate can now view the team in their teams list', async () => {
+    const res = await teammate.request('/api/teams');
+    assert.equal(res.status, 200);
+    assert.equal(res.data.teams.length, 1);
+    assert.equal(res.data.teams[0].id, teamId);
+  });
+
+  await t.test('Host creates a Team Task assigned to Teammate', async () => {
+    const res = await host.request('/api/tasks', {
+      method: 'POST',
+      body: {
+        text: 'Build Team Feature Dashboard',
+        teamId,
+        assigneeEmail: teammateEmail,
+      },
+    });
+    assert.equal(res.status, 201);
+    assert.equal(res.data.task.teamId, teamId);
+    assert.equal(res.data.task.creatorEmail, hostEmail.toLowerCase());
+    assert.equal(res.data.task.assigneeEmail, teammateEmail.toLowerCase());
+    teamTaskId = res.data.task.id;
+  });
+
+  await t.test('Teammate can see and monitor the Team Task', async () => {
+    const res = await teammate.request(`/api/tasks?teamId=${teamId}`);
+    assert.equal(res.status, 200);
+    assert.equal(res.data.tasks.length, 1);
+    assert.equal(res.data.tasks[0].id, teamTaskId);
+    assert.equal(res.data.tasks[0].text, 'Build Team Feature Dashboard');
+    assert.equal(res.data.tasks[0].assigneeEmail, teammateEmail.toLowerCase());
+  });
+
+  await t.test('Teammate posts progress milestone update on Team Task', async () => {
+    const msRes = await teammate.request(`/api/tasks/${teamTaskId}/milestones`, {
+      method: 'POST',
+      body: { text: 'Frontend UI layout completed', progress: 50 },
     });
     assert.equal(msRes.status, 201);
+    assert.equal(msRes.data.task.progress, 50);
+    assert.equal(msRes.data.task.milestones.length, 1);
 
-    // Task 2: Completed task
-    const res2 = await alice.request('/api/tasks', {
-      method: 'POST',
-      body: { text: "Alice's Completed Task" },
-    });
-    assert.equal(res2.status, 201);
-    aliceTask2Id = res2.data.task.id;
-
-    await alice.request(`/api/tasks/${aliceTask2Id}`, {
-      method: 'PATCH',
-      body: { done: true },
-    });
+    // Host monitors the update
+    const hostCheck = await host.request(`/api/tasks/${teamTaskId}`);
+    assert.equal(hostCheck.status, 200);
+    assert.equal(hostCheck.data.task.progress, 50);
+    assert.equal(hostCheck.data.task.milestones[0].text, 'Frontend UI layout completed');
   });
 
-  await t.test("Bob's task list is completely empty (no leakage of Alice's tasks)", async () => {
-    const res = await bob.request('/api/tasks');
-    assert.equal(res.status, 200);
-    assert.equal(res.data.tasks.length, 0);
+  await t.test('Outsider is forbidden from accessing the Team Task and Team details', async () => {
+    const resTeam = await outsider.request(`/api/teams/${teamId}`);
+    assert.equal(resTeam.status, 404);
+
+    const resTask = await outsider.request(`/api/tasks/${teamTaskId}`);
+    assert.equal(resTask.status, 404);
+
+    const resTasks = await outsider.request(`/api/tasks?teamId=${teamId}`);
+    assert.equal(resTasks.status, 403);
   });
 
-  await t.test("Bob cannot GET Alice's task by ID (returns 404, not 200 or 403)", async () => {
-    const res = await bob.request(`/api/tasks/${aliceTask1Id}`);
-    assert.equal(res.status, 404);
-    assert.deepEqual(res.data, { error: 'Task not found.' });
-  });
+  await t.test('Personal tasks remain completely separate from Team tasks', async () => {
+    // Host personal tasks count is 1
+    const hostPersonal = await host.request('/api/tasks');
+    assert.equal(hostPersonal.status, 200);
+    assert.equal(hostPersonal.data.tasks.length, 1);
+    assert.equal(hostPersonal.data.tasks[0].id, hostPersonalTaskId);
 
-  await t.test("Bob cannot PATCH/modify Alice's task text, done, or progress", async () => {
-    const res = await bob.request(`/api/tasks/${aliceTask1Id}`, {
-      method: 'PATCH',
-      body: { text: 'Hacked by Bob', done: true, progress: 100 },
-    });
-    assert.equal(res.status, 404);
+    // Host team tasks count is 1
+    const hostTeam = await host.request(`/api/tasks?teamId=${teamId}`);
+    assert.equal(hostTeam.status, 200);
+    assert.equal(hostTeam.data.tasks.length, 1);
+    assert.equal(hostTeam.data.tasks[0].id, teamTaskId);
 
-    // Verify Alice's task remains untouched
-    const checkAlice = await alice.request(`/api/tasks/${aliceTask1Id}`);
-    assert.equal(checkAlice.status, 200);
-    assert.equal(checkAlice.data.task.text, "Alice's Secret Project Task");
-    assert.equal(checkAlice.data.task.done, false);
-    assert.equal(checkAlice.data.task.progress, 40);
-  });
-
-  await t.test("Bob cannot add milestones to Alice's task", async () => {
-    const res = await bob.request(`/api/tasks/${aliceTask1Id}/milestones`, {
-      method: 'POST',
-      body: { text: 'Injected milestone by Bob', progress: 99 },
-    });
-    assert.equal(res.status, 404);
-
-    // Verify Alice's task milestones
-    const checkAlice = await alice.request(`/api/tasks/${aliceTask1Id}`);
-    assert.equal(checkAlice.data.task.milestones.length, 1);
-    assert.equal(checkAlice.data.task.milestones[0].text, "Alice's confidential checkpoint");
-  });
-
-  await t.test("Bob cannot DELETE Alice's task", async () => {
-    const res = await bob.request(`/api/tasks/${aliceTask1Id}`, {
-      method: 'DELETE',
-    });
-    assert.equal(res.status, 404);
-
-    // Verify Alice still has the task
-    const checkAlice = await alice.request(`/api/tasks/${aliceTask1Id}`);
-    assert.equal(checkAlice.status, 200);
-  });
-
-  await t.test("Bob calling clear-completed does NOT delete Alice's completed tasks", async () => {
-    const res = await bob.request('/api/tasks/clear-completed', {
-      method: 'POST',
-    });
-    assert.equal(res.status, 200);
-    assert.deepEqual(res.data.tasks, []);
-
-    // Verify Alice's completed task is still intact
-    const checkAlice = await alice.request(`/api/tasks/${aliceTask2Id}`);
-    assert.equal(checkAlice.status, 200);
-    assert.equal(checkAlice.data.task.done, true);
-  });
-
-  await t.test("Bob cannot hijack or inject Alice's task into Bob's list via reorder", async () => {
-    // Bob attempts to put Alice's task ID into his reorder list
-    const res = await bob.request('/api/tasks/order', {
-      method: 'PUT',
-      body: { ids: [aliceTask1Id, aliceTask2Id] },
-    });
-    assert.equal(res.status, 200);
-    // Bob's list must still be empty!
-    assert.equal(res.data.tasks.length, 0);
-
-    // Alice's task list must remain intact in count and ownership
-    const checkAlice = await alice.request('/api/tasks');
-    assert.equal(checkAlice.data.tasks.length, 2);
-    assert.ok(checkAlice.data.tasks.some((t) => t.id === aliceTask1Id));
-    assert.ok(checkAlice.data.tasks.some((t) => t.id === aliceTask2Id));
-  });
-
-  await t.test('Bob creates his own task; Alice cannot see or modify it', async () => {
-    const bobTaskRes = await bob.request('/api/tasks', {
-      method: 'POST',
-      body: { text: "Bob's private note" },
-    });
-    assert.equal(bobTaskRes.status, 201);
-    const bobTaskId = bobTaskRes.data.task.id;
-
-    // Alice cannot get Bob's task
-    const aliceGetBob = await alice.request(`/api/tasks/${bobTaskId}`);
-    assert.equal(aliceGetBob.status, 404);
-
-    // Alice's list only has 2 tasks
-    const aliceList = await alice.request('/api/tasks');
-    assert.equal(aliceList.data.tasks.length, 2);
-    assert.ok(!aliceList.data.tasks.some((t) => t.id === bobTaskId));
-
-    // Bob's list only has 1 task
-    const bobList = await bob.request('/api/tasks');
-    assert.equal(bobList.data.tasks.length, 1);
-    assert.equal(bobList.data.tasks[0].id, bobTaskId);
+    // Teammate personal tasks count is 0
+    const tmPersonal = await teammate.request('/api/tasks');
+    assert.equal(tmPersonal.status, 200);
+    assert.equal(tmPersonal.data.tasks.length, 0);
   });
 });

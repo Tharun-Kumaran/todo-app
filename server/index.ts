@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import type { User } from '../shared/types';
 import { TaskStore, type TaskPatch } from './store';
 import { UserStore, normalizeEmail, passwordProblem } from './users';
+import { TeamStore } from './teams';
 import {
   SESSION_COOKIE,
   SessionStore,
@@ -30,6 +31,9 @@ const usersFile = process.env.TODO_USERS_FILE
 const sessionsFile = process.env.TODO_SESSIONS_FILE
   ? path.resolve(process.env.TODO_SESSIONS_FILE)
   : path.join(dataDir, 'sessions.json');
+const teamsFile = process.env.TODO_TEAMS_FILE
+  ? path.resolve(process.env.TODO_TEAMS_FILE)
+  : path.join(dataDir, 'teams.json');
 
 const port = Number(process.env.PORT) || 3001;
 const maxTextLength = 500;
@@ -44,7 +48,8 @@ const corsOrigin = process.env.TODO_CORS_ORIGIN?.trim() || null;
 const store = new TaskStore(dataFile);
 const users = new UserStore(usersFile);
 const sessions = new SessionStore(sessionsFile, sessionTtlMs);
-await Promise.all([store.init(), users.init(), sessions.init()]);
+const teams = new TeamStore(teamsFile);
+await Promise.all([store.init(), users.init(), sessions.init(), teams.init()]);
 
 const app = express();
 app.disable('x-powered-by');
@@ -142,8 +147,20 @@ const requireUser: RequestHandler = (req, res, next) => {
   next();
 };
 
+function currentUser(res: Response): User {
+  return res.locals.user as User;
+}
+
 function currentUserId(res: Response): string {
-  return (res.locals.user as User).id;
+  return currentUser(res).id;
+}
+
+function currentUserEmail(res: Response): string {
+  return currentUser(res).email;
+}
+
+function currentUserTeamIds(res: Response): string[] {
+  return teams.getUserTeamIds(currentUserId(res), currentUserEmail(res));
 }
 
 function routeParam(req: Request, name: string): string {
@@ -226,18 +243,127 @@ app.post('/api/auth/logout', async (req, res, next) => {
   }
 });
 
+// --- Teams ----------------------------------------------------------------
+
+app.get('/api/teams', requireUser, (_req, res) => {
+  res.json({
+    teams: teams.listForUser(currentUserId(res), currentUserEmail(res)),
+  });
+});
+
+app.post('/api/teams', requireUser, async (req, res, next) => {
+  try {
+    const body = (req.body ?? {}) as { name?: unknown };
+    const name = typeof body.name === 'string' ? body.name.trim() : '';
+    if (!name) {
+      res.status(400).json({ error: 'Team name is required.' });
+      return;
+    }
+    const team = await teams.create(
+      currentUserId(res),
+      currentUserEmail(res),
+      name,
+    );
+    res.status(201).json({ team });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/teams/:id', requireUser, (req, res) => {
+  const team = teams.get(
+    routeParam(req, 'id'),
+    currentUserId(res),
+    currentUserEmail(res),
+  );
+  if (!team) {
+    res.status(404).json({ error: 'Team not found.' });
+    return;
+  }
+  res.json({ team });
+});
+
+app.post('/api/teams/:id/members', requireUser, async (req, res, next) => {
+  try {
+    const body = (req.body ?? {}) as { email?: unknown };
+    const email = typeof body.email === 'string' ? body.email.trim() : '';
+    if (!email) {
+      res.status(400).json({ error: 'Member email is required.' });
+      return;
+    }
+
+    const targetUser = users.findByEmail(email);
+    const result = await teams.addMember(
+      routeParam(req, 'id'),
+      currentUserId(res),
+      currentUserEmail(res),
+      email,
+      targetUser?.id ?? null,
+    );
+
+    if (!result.team) {
+      res.status(400).json({ error: result.error || 'Could not add member.' });
+      return;
+    }
+    res.status(201).json({ team: result.team });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete(
+  '/api/teams/:id/members/:email',
+  requireUser,
+  async (req, res, next) => {
+    try {
+      const targetEmail = routeParam(req, 'email');
+      const result = await teams.removeMember(
+        routeParam(req, 'id'),
+        currentUserId(res),
+        currentUserEmail(res),
+        targetEmail,
+      );
+      if (!result.team) {
+        res
+          .status(400)
+          .json({ error: result.error || 'Could not remove member.' });
+        return;
+      }
+      res.json({ team: result.team });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
 // --- Tasks ----------------------------------------------------------------
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/api/tasks', requireUser, (_req, res) => {
-  res.json({ tasks: store.listFor(currentUserId(res)) });
+app.get('/api/tasks', requireUser, (req, res) => {
+  const teamId =
+    typeof req.query.teamId === 'string' && req.query.teamId
+      ? req.query.teamId
+      : null;
+  if (teamId) {
+    if (!teams.isMember(teamId, currentUserId(res), currentUserEmail(res))) {
+      res.status(403).json({ error: 'Not a member of this team.' });
+      return;
+    }
+    res.json({ tasks: store.listFor(currentUserId(res), teamId) });
+    return;
+  }
+  res.json({ tasks: store.listFor(currentUserId(res), null) });
 });
 
 app.get('/api/tasks/:id', requireUser, (req, res) => {
-  const task = store.get(currentUserId(res), routeParam(req, 'id'));
+  const task = store.get(
+    currentUserId(res),
+    routeParam(req, 'id'),
+    currentUserTeamIds(res),
+  );
   if (!task) {
     res.status(404).json({ error: 'Task not found.' });
     return;
@@ -247,7 +373,12 @@ app.get('/api/tasks/:id', requireUser, (req, res) => {
 
 app.post('/api/tasks', requireUser, async (req, res, next) => {
   try {
-    const body = (req.body ?? {}) as { text?: unknown; dueAt?: unknown };
+    const body = (req.body ?? {}) as {
+      text?: unknown;
+      dueAt?: unknown;
+      teamId?: unknown;
+      assigneeEmail?: unknown;
+    };
     const text = readText(body.text);
     if (!text) {
       res.status(400).json({ error: 'Task text is required.' });
@@ -260,10 +391,28 @@ app.post('/api/tasks', requireUser, async (req, res, next) => {
       return;
     }
 
+    const teamId =
+      typeof body.teamId === 'string' && body.teamId ? body.teamId : null;
+    if (
+      teamId &&
+      !teams.isMember(teamId, currentUserId(res), currentUserEmail(res))
+    ) {
+      res.status(403).json({ error: 'Not a member of this team.' });
+      return;
+    }
+
+    const assigneeEmail =
+      typeof body.assigneeEmail === 'string' && body.assigneeEmail.trim()
+        ? body.assigneeEmail.trim().toLowerCase()
+        : null;
+
     const task = await store.add(
       currentUserId(res),
+      currentUserEmail(res),
       text,
       dueAt.value ?? null,
+      teamId,
+      assigneeEmail,
     );
     res.status(201).json({ task });
   } catch (error) {
@@ -278,6 +427,7 @@ app.patch('/api/tasks/:id', requireUser, async (req, res, next) => {
       done?: unknown;
       dueAt?: unknown;
       progress?: unknown;
+      assigneeEmail?: unknown;
     };
     const patch: TaskPatch = {};
 
@@ -312,6 +462,13 @@ app.patch('/api/tasks/:id', requireUser, async (req, res, next) => {
     }
     if (dueAt.value !== undefined) patch.dueAt = dueAt.value;
 
+    if (body.assigneeEmail !== undefined) {
+      patch.assigneeEmail =
+        typeof body.assigneeEmail === 'string' && body.assigneeEmail.trim()
+          ? body.assigneeEmail.trim().toLowerCase()
+          : null;
+    }
+
     if (Object.keys(patch).length === 0) {
       res.status(400).json({ error: 'Nothing to update.' });
       return;
@@ -320,6 +477,7 @@ app.patch('/api/tasks/:id', requireUser, async (req, res, next) => {
     const task = await store.update(
       currentUserId(res),
       routeParam(req, 'id'),
+      currentUserTeamIds(res),
       patch,
     );
     if (!task) {
@@ -350,6 +508,7 @@ app.post('/api/tasks/:id/milestones', requireUser, async (req, res, next) => {
     const task = await store.addMilestone(
       currentUserId(res),
       routeParam(req, 'id'),
+      currentUserTeamIds(res),
       text,
       progress.value,
     );
@@ -368,6 +527,7 @@ app.delete('/api/tasks/:id', requireUser, async (req, res, next) => {
     const removed = await store.remove(
       currentUserId(res),
       routeParam(req, 'id'),
+      currentUserTeamIds(res),
     );
     if (!removed) {
       res.status(404).json({ error: 'Task not found.' });
@@ -379,9 +539,20 @@ app.delete('/api/tasks/:id', requireUser, async (req, res, next) => {
   }
 });
 
-app.post('/api/tasks/clear-completed', requireUser, async (_req, res, next) => {
+app.post('/api/tasks/clear-completed', requireUser, async (req, res, next) => {
   try {
-    res.json({ tasks: await store.clearCompleted(currentUserId(res)) });
+    const teamId =
+      typeof req.query.teamId === 'string' && req.query.teamId
+        ? req.query.teamId
+        : null;
+    if (
+      teamId &&
+      !teams.isMember(teamId, currentUserId(res), currentUserEmail(res))
+    ) {
+      res.status(403).json({ error: 'Not a member of this team.' });
+      return;
+    }
+    res.json({ tasks: await store.clearCompleted(currentUserId(res), teamId) });
   } catch (error) {
     next(error);
   }
@@ -394,7 +565,18 @@ app.put('/api/tasks/order', requireUser, async (req, res, next) => {
       res.status(400).json({ error: '`ids` must be an array of task ids.' });
       return;
     }
-    res.json({ tasks: await store.reorder(currentUserId(res), ids) });
+    const teamId =
+      typeof req.query.teamId === 'string' && req.query.teamId
+        ? req.query.teamId
+        : null;
+    if (
+      teamId &&
+      !teams.isMember(teamId, currentUserId(res), currentUserEmail(res))
+    ) {
+      res.status(403).json({ error: 'Not a member of this team.' });
+      return;
+    }
+    res.json({ tasks: await store.reorder(currentUserId(res), ids, teamId) });
   } catch (error) {
     next(error);
   }
@@ -408,32 +590,37 @@ const distDir = path.join(here, '..', 'dist');
 
 if (existsSync(distDir)) {
   app.use(express.static(distDir));
-  app.use((req, res, next) => {
-    if (req.method !== 'GET') {
-      next();
-      return;
-    }
+  app.use((_req, res) => {
     res.sendFile(path.join(distDir, 'index.html'));
-  });
-} else {
-  app.get('/', (_req, res) => {
-    res.json({
-      name: 'todo-app',
-      hint: 'Run "npm run dev" for the UI, or "npm run build" then "npm start".',
-    });
   });
 }
 
 const errorHandler: ErrorRequestHandler = (error, _req, res, _next) => {
-  console.error(error);
-  res.status(500).json({ error: 'Something went wrong on the server.' });
+  if (error && typeof error === 'object' && 'type' in error) {
+    if ((error as { type?: string }).type === 'entity.too.large') {
+      res.status(413).json({ error: 'Payload too large.' });
+      return;
+    }
+  }
+  console.error('Unhandled server error:', error);
+  res.status(500).json({ error: 'Internal server error.' });
 };
+
 app.use(errorHandler);
 
-app.listen(port, () => {
+const server = app.listen(port, () => {
   console.log(`API listening on http://localhost:${port}`);
-  console.log(`Data files: ${dataFile}, ${usersFile}, ${sessionsFile}`);
+  console.log(`Data files: ${dataFile}, ${usersFile}, ${sessionsFile}, ${teamsFile}`);
   if (existsSync(distDir)) {
     console.log(`Serving built UI from ${distDir}`);
   }
 });
+
+const shutdown = async (signal: string) => {
+  console.log(`Received ${signal}; shutting down gracefully.`);
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(1), 5000).unref();
+};
+
+process.on('SIGINT', () => void shutdown('SIGINT'));
+process.on('SIGTERM', () => void shutdown('SIGTERM'));

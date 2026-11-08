@@ -10,7 +10,7 @@ interface TaskFile {
 
 /**
  * Stored tasks may predate accounts (`userId: null`). The first account to
- * register claims them; after that every task belongs to exactly one user.
+ * register claims them; after that every task belongs to a user or a team.
  */
 type StoredTask = Omit<Task, 'userId'> & { userId: string | null };
 
@@ -19,6 +19,7 @@ export interface TaskPatch {
   done?: boolean;
   dueAt?: string | null;
   progress?: number;
+  assigneeEmail?: string | null;
 }
 
 /**
@@ -26,8 +27,8 @@ export interface TaskPatch {
  * Every mutation writes the whole file through a temp file + rename,
  * so a crash can't leave a half-written tasks.json behind.
  *
- * All reads and writes are scoped to a user id, so one account can never
- * see or change another account's tasks.
+ * All reads and writes are scoped to a user id or team membership,
+ * so one account can never see or change another account's personal tasks.
  */
 export class TaskStore {
   private tasks: StoredTask[] = [];
@@ -62,28 +63,55 @@ export class TaskStore {
     }
   }
 
-  listFor(userId: string): Task[] {
+  private canAccess(task: StoredTask, userId: string, userTeamIds: string[]): boolean {
+    if (task.teamId) {
+      return userTeamIds.includes(task.teamId);
+    }
+    return task.userId === userId;
+  }
+
+  listFor(userId: string, teamId?: string | null): Task[] {
+    if (teamId) {
+      return this.tasks
+        .filter((task) => task.teamId === teamId)
+        .map(toTask);
+    }
     return this.tasks
-      .filter((task) => task.userId === userId)
+      .filter((task) => task.userId === userId && (!task.teamId || task.teamId === null))
       .map(toTask);
   }
 
-  countFor(userId: string): number {
-    return this.tasks.filter((task) => task.userId === userId).length;
+  countFor(userId: string, teamId?: string | null): number {
+    if (teamId) {
+      return this.tasks.filter((task) => task.teamId === teamId).length;
+    }
+    return this.tasks.filter(
+      (task) => task.userId === userId && (!task.teamId || task.teamId === null),
+    ).length;
   }
 
-  get(userId: string, id: string): Task | null {
+  get(userId: string, id: string, userTeamIds: string[] = []): Task | null {
     const task = this.tasks.find(
-      (item) => item.id === id && item.userId === userId,
+      (item) => item.id === id && this.canAccess(item, userId, userTeamIds),
     );
     return task ? toTask(task) : null;
   }
 
-  add(userId: string, text: string, dueAt: string | null): Promise<Task> {
+  add(
+    userId: string,
+    creatorEmail: string,
+    text: string,
+    dueAt: string | null,
+    teamId?: string | null,
+    assigneeEmail?: string | null,
+  ): Promise<Task> {
     const now = new Date().toISOString();
-    const task: Task = {
+    const task: StoredTask = {
       id: randomUUID(),
       userId,
+      creatorEmail,
+      teamId: teamId || null,
+      assigneeEmail: assigneeEmail || null,
       text,
       done: false,
       createdAt: now,
@@ -95,14 +123,19 @@ export class TaskStore {
     };
     return this.mutate((tasks) => ({
       next: [task, ...tasks],
-      result: cloneTask(task),
+      result: toTask(task),
     }));
   }
 
-  update(userId: string, id: string, patch: TaskPatch): Promise<Task | null> {
+  update(
+    userId: string,
+    id: string,
+    userTeamIds: string[],
+    patch: TaskPatch,
+  ): Promise<Task | null> {
     return this.mutate((tasks) => {
       const index = tasks.findIndex(
-        (task) => task.id === id && task.userId === userId,
+        (task) => task.id === id && this.canAccess(task, userId, userTeamIds),
       );
       if (index === -1) return { next: tasks, result: null };
 
@@ -138,12 +171,13 @@ export class TaskStore {
   addMilestone(
     userId: string,
     id: string,
+    userTeamIds: string[],
     text: string,
     progress?: number,
   ): Promise<Task | null> {
     return this.mutate((tasks) => {
       const index = tasks.findIndex(
-        (task) => task.id === id && task.userId === userId,
+        (task) => task.id === id && this.canAccess(task, userId, userTeamIds),
       );
       if (index === -1) return { next: tasks, result: null };
 
@@ -172,36 +206,49 @@ export class TaskStore {
     });
   }
 
-  remove(userId: string, id: string): Promise<boolean> {
+  remove(userId: string, id: string, userTeamIds: string[]): Promise<boolean> {
     return this.mutate((tasks) => {
       const next = tasks.filter(
-        (task) => !(task.id === id && task.userId === userId),
+        (task) => !(task.id === id && this.canAccess(task, userId, userTeamIds)),
       );
       return { next, result: next.length !== tasks.length };
     });
   }
 
-  clearCompleted(userId: string): Promise<Task[]> {
+  clearCompleted(userId: string, teamId?: string | null): Promise<Task[]> {
     return this.mutate((tasks) => {
-      const next = tasks.filter(
-        (task) => task.userId !== userId || !task.done,
-      );
+      const next = tasks.filter((task) => {
+        if (!task.done) return true;
+        if (teamId) {
+          return task.teamId !== teamId;
+        }
+        return !(task.userId === userId && (!task.teamId || task.teamId === null));
+      });
       return {
         next,
-        result: next
-          .filter((task) => task.userId === userId)
-          .map(toTask),
+        result: teamId
+          ? next.filter((task) => task.teamId === teamId).map(toTask)
+          : next
+              .filter(
+                (task) => task.userId === userId && (!task.teamId || task.teamId === null),
+              )
+              .map(toTask),
       };
     });
   }
 
-  reorder(userId: string, ids: string[]): Promise<Task[]> {
+  reorder(userId: string, ids: string[], teamId?: string | null): Promise<Task[]> {
     return this.mutate((tasks) => {
-      const owned = tasks.filter((task) => task.userId === userId);
-      const byId = new Map(owned.map((task) => [task.id, task]));
+      const scoped = teamId
+        ? tasks.filter((task) => task.teamId === teamId)
+        : tasks.filter(
+            (task) => task.userId === userId && (!task.teamId || task.teamId === null),
+          );
 
+      const byId = new Map(scoped.map((task) => [task.id, task]));
       const seen = new Set<string>();
       const ordered: StoredTask[] = [];
+
       for (const id of ids) {
         const task = byId.get(id);
         if (task && !seen.has(id)) {
@@ -209,21 +256,29 @@ export class TaskStore {
           ordered.push(task);
         }
       }
-      for (const task of owned) {
+      for (const task of scoped) {
         if (!seen.has(task.id)) ordered.push(task);
       }
 
-      // Replace the user's tasks in place so other accounts keep their order.
       let cursor = 0;
+      const isTarget = (task: StoredTask) =>
+        teamId
+          ? task.teamId === teamId
+          : task.userId === userId && (!task.teamId || task.teamId === null);
+
       const next = tasks.map((task) =>
-        task.userId === userId ? ordered[cursor++] ?? task : task,
+        isTarget(task) ? ordered[cursor++] ?? task : task,
       );
 
       return {
         next,
-        result: next
-          .filter((task) => task.userId === userId)
-          .map(toTask),
+        result: teamId
+          ? next.filter((task) => task.teamId === teamId).map(toTask)
+          : next
+              .filter(
+                (task) => task.userId === userId && (!task.teamId || task.teamId === null),
+              )
+              .map(toTask),
       };
     });
   }
@@ -251,32 +306,30 @@ export class TaskStore {
       this.tasks = next;
       return result;
     });
-    this.opChain = run.then(
-      () => undefined,
-      () => undefined,
-    );
+    this.opChain = run.catch(() => {});
     return run;
   }
 
   private async persist(tasks: StoredTask[]): Promise<void> {
-    await fs.mkdir(path.dirname(this.file), { recursive: true });
-    const temp = `${this.file}.${process.pid}.tmp`;
-    const body: TaskFile = { version: 3, tasks };
-    await fs.writeFile(temp, `${JSON.stringify(body, null, 2)}\n`, 'utf8');
+    const dir = path.dirname(this.file);
+    await fs.mkdir(dir, { recursive: true });
+    const temp = `${this.file}.tmp-${Date.now()}-${randomUUID().slice(0, 8)}`;
+    const payload: TaskFile = { version: 3, tasks };
+    await fs.writeFile(temp, JSON.stringify(payload, null, 2), 'utf8');
     await fs.rename(temp, this.file);
   }
 }
 
 function clamp(value: number): number {
+  if (Number.isNaN(value)) return 0;
   return Math.min(100, Math.max(0, Math.round(value)));
 }
 
-function cloneTask(task: Task): Task {
-  return { ...task, milestones: task.milestones.map((entry) => ({ ...entry })) };
-}
-
 function cloneStoredTask(task: StoredTask): StoredTask {
-  return { ...task, milestones: task.milestones.map((entry) => ({ ...entry })) };
+  return {
+    ...task,
+    milestones: task.milestones.map((entry) => ({ ...entry })),
+  };
 }
 
 function toTask(task: StoredTask): Task {
@@ -286,13 +339,16 @@ function toTask(task: StoredTask): Task {
   return {
     ...task,
     userId: task.userId,
+    creatorEmail: task.creatorEmail ?? null,
+    teamId: task.teamId ?? null,
+    assigneeEmail: task.assigneeEmail ?? null,
     milestones: task.milestones.map((entry) => ({ ...entry })),
   };
 }
 
 /**
  * Accepts tasks written by any version of the store and fills in fields
- * added later (accounts, deadlines, progress, milestones) with safe defaults.
+ * added later with safe defaults.
  */
 function normalizeTask(value: unknown): StoredTask | null {
   if (!value || typeof value !== 'object') return null;
@@ -320,6 +376,18 @@ function normalizeTask(value: unknown): StoredTask | null {
     userId:
       typeof task.userId === 'string' && task.userId.length > 0
         ? task.userId
+        : null,
+    creatorEmail:
+      typeof task.creatorEmail === 'string' && task.creatorEmail.length > 0
+        ? task.creatorEmail
+        : null,
+    teamId:
+      typeof task.teamId === 'string' && task.teamId.length > 0
+        ? task.teamId
+        : null,
+    assigneeEmail:
+      typeof task.assigneeEmail === 'string' && task.assigneeEmail.length > 0
+        ? task.assigneeEmail
         : null,
     text: task.text,
     done: task.done,

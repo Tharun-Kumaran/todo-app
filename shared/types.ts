@@ -12,10 +12,32 @@ export interface User {
   createdAt: string;
 }
 
+export interface TeamMember {
+  userId?: string | null;
+  email: string;
+  role: 'owner' | 'member';
+  joinedAt: string;
+}
+
+export interface Team {
+  id: string;
+  name: string;
+  ownerId: string;
+  ownerEmail: string;
+  members: TeamMember[];
+  createdAt: string;
+}
+
 export interface Task {
   id: string;
-  /** Owner of the task. Tasks are only returned to their owner. */
+  /** User ID of the creator. */
   userId: string;
+  /** Email of the creator for display in team views. */
+  creatorEmail?: string | null;
+  /** ID of the team this task belongs to, or null/undefined if personal. */
+  teamId?: string | null;
+  /** Optional email of the team member assigned to this task. */
+  assigneeEmail?: string | null;
   text: string;
   done: boolean;
   createdAt: string;
@@ -40,6 +62,14 @@ export interface TaskResponse {
 
 export interface AuthResponse {
   user: User;
+}
+
+export interface TeamResponse {
+  team: Team;
+}
+
+export interface TeamsResponse {
+  teams: Team[];
 }
 
 export type Filter = 'all' | 'pending' | 'overdue' | 'completed';

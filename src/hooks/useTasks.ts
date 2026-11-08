@@ -6,7 +6,7 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Something went wrong.';
 }
 
-export function useTasks() {
+export function useTasks(teamId?: string | null) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -14,23 +14,27 @@ export function useTasks() {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      setTasks(await api.fetchTasks());
+      setTasks(await api.fetchTasks(teamId));
       setError(null);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [teamId]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
 
   const addTask = useCallback(
-    async (text: string, dueAt: string | null): Promise<boolean> => {
+    async (
+      text: string,
+      dueAt: string | null,
+      assigneeEmail?: string | null,
+    ): Promise<boolean> => {
       try {
-        const task = await api.createTask(text, dueAt);
+        const task = await api.createTask(text, dueAt, teamId, assigneeEmail);
         setTasks((current) => [task, ...current]);
         setError(null);
         return true;
@@ -39,7 +43,7 @@ export function useTasks() {
         return false;
       }
     },
-    [],
+    [teamId],
   );
 
   const toggleTask = useCallback(async (task: Task): Promise<boolean> => {
@@ -82,6 +86,30 @@ export function useTasks() {
         setError(null);
         return true;
       } catch (err) {
+        setError(errorMessage(err));
+        return false;
+      }
+    },
+    [],
+  );
+
+  const setAssignee = useCallback(
+    async (task: Task, assigneeEmail: string | null): Promise<boolean> => {
+      const optimistic: Task = { ...task, assigneeEmail };
+      setTasks((current) =>
+        current.map((item) => (item.id === task.id ? optimistic : item)),
+      );
+      try {
+        const updated = await api.updateTask(task.id, { assigneeEmail });
+        setTasks((current) =>
+          current.map((item) => (item.id === updated.id ? updated : item)),
+        );
+        setError(null);
+        return true;
+      } catch (err) {
+        setTasks((current) =>
+          current.map((item) => (item.id === task.id ? task : item)),
+        );
         setError(errorMessage(err));
         return false;
       }
@@ -177,20 +205,25 @@ export function useTasks() {
 
   const clearDone = useCallback(async (): Promise<boolean> => {
     try {
-      setTasks(await api.clearCompleted());
+      setTasks(await api.clearCompleted(teamId));
       setError(null);
       return true;
     } catch (err) {
       setError(errorMessage(err));
       return false;
     }
-  }, []);
+  }, [teamId]);
 
   const reorder = useCallback(
     async (ordered: Task[]): Promise<boolean> => {
       setTasks(ordered);
       try {
-        setTasks(await api.reorderTasks(ordered.map((task) => task.id)));
+        setTasks(
+          await api.reorderTasks(
+            ordered.map((task) => task.id),
+            teamId,
+          ),
+        );
         setError(null);
         return true;
       } catch (err) {
@@ -199,7 +232,7 @@ export function useTasks() {
         return false;
       }
     },
-    [refresh],
+    [refresh, teamId],
   );
 
   const dismissError = useCallback(() => setError(null), []);
@@ -212,6 +245,7 @@ export function useTasks() {
     addTask,
     toggleTask,
     editTask,
+    setAssignee,
     setProgress,
     setDue,
     addMilestone,
