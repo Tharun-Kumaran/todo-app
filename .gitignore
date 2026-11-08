@@ -1,8 +1,25 @@
-# OS junk
+# dependencies and build output
+node_modules/
+dist/
+
+# runtime data (tasks contain personal notes)
+server/data/*
+!server/data/.gitkeep
+
+# local env
+.env
+.env.*
+!.env.example
+*.local
+
+# logs and OS junk
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store
 Thumbs.db
 Desktop.ini
-.DS_Store
 
-# Editor folders
+# editors
 .vscode/
 .idea/
