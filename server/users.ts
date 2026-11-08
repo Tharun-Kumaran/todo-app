@@ -142,6 +142,20 @@ export class UserStore {
 
   /** Verify an email/password pair without revealing whether the email exists. */
   async authenticate(email: string, password: string): Promise<User | null> {
+    let user = await this.verifyCredentials(email, password);
+    if (!user) {
+      // Reload in case an external script or admin updated the file
+      try {
+        await this.init();
+        user = await this.verifyCredentials(email, password);
+      } catch {
+        // Ignore reload error
+      }
+    }
+    return user;
+  }
+
+  private async verifyCredentials(email: string, password: string): Promise<User | null> {
     const record = this.users.find((item) => item.email === email);
     const key = await deriveKey(password, record?.salt ?? DUMMY_SALT);
     if (!record) return null;
