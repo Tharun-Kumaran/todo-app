@@ -32,25 +32,43 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
+export interface TaskPatch {
+  text?: string;
+  done?: boolean;
+  dueAt?: string | null;
+  progress?: number;
+}
+
 export function fetchTasks(): Promise<Task[]> {
   return request<{ tasks: Task[] }>('/api/tasks').then((data) => data.tasks);
 }
 
-export function createTask(text: string): Promise<Task> {
+export function createTask(text: string, dueAt: string | null = null): Promise<Task> {
   return request<{ task: Task }>('/api/tasks', {
     method: 'POST',
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ text, dueAt }),
   }).then((data) => data.task);
 }
 
-export function updateTask(
-  id: string,
-  patch: { text?: string; done?: boolean },
-): Promise<Task> {
+export function updateTask(id: string, patch: TaskPatch): Promise<Task> {
   return request<{ task: Task }>(`/api/tasks/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     body: JSON.stringify(patch),
   }).then((data) => data.task);
+}
+
+export function addMilestone(
+  id: string,
+  text: string,
+  progress: number,
+): Promise<Task> {
+  return request<{ task: Task }>(
+    `/api/tasks/${encodeURIComponent(id)}/milestones`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ text, progress }),
+    },
+  ).then((data) => data.task);
 }
 
 export function deleteTask(id: string): Promise<void> {

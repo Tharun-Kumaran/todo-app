@@ -27,27 +27,36 @@ export function useTasks() {
     void refresh();
   }, [refresh]);
 
-  const addTask = useCallback(async (text: string): Promise<boolean> => {
-    try {
-      const task = await api.createTask(text);
-      setTasks((current) => [task, ...current]);
-      setError(null);
-      return true;
-    } catch (err) {
-      setError(errorMessage(err));
-      return false;
-    }
-  }, []);
+  const addTask = useCallback(
+    async (text: string, dueAt: string | null): Promise<boolean> => {
+      try {
+        const task = await api.createTask(text, dueAt);
+        setTasks((current) => [task, ...current]);
+        setError(null);
+        return true;
+      } catch (err) {
+        setError(errorMessage(err));
+        return false;
+      }
+    },
+    [],
+  );
 
   const toggleTask = useCallback(async (task: Task): Promise<boolean> => {
     const nextDone = !task.done;
+    const optimistic: Task = {
+      ...task,
+      done: nextDone,
+      progress: nextDone ? 100 : 0,
+    };
     setTasks((current) =>
-      current.map((item) =>
-        item.id === task.id ? { ...item, done: nextDone } : item,
-      ),
+      current.map((item) => (item.id === task.id ? optimistic : item)),
     );
     try {
-      const updated = await api.updateTask(task.id, { done: nextDone });
+      const updated = await api.updateTask(task.id, {
+        done: nextDone,
+        progress: nextDone ? 100 : 0,
+      });
       setTasks((current) =>
         current.map((item) => (item.id === updated.id ? updated : item)),
       );
@@ -66,6 +75,72 @@ export function useTasks() {
     async (id: string, text: string): Promise<boolean> => {
       try {
         const updated = await api.updateTask(id, { text });
+        setTasks((current) =>
+          current.map((item) => (item.id === updated.id ? updated : item)),
+        );
+        setError(null);
+        return true;
+      } catch (err) {
+        setError(errorMessage(err));
+        return false;
+      }
+    },
+    [],
+  );
+
+  const setProgress = useCallback(
+    async (task: Task, progress: number): Promise<boolean> => {
+      const value = Math.min(100, Math.max(0, Math.round(progress)));
+      const optimistic: Task = { ...task, progress: value, done: value >= 100 };
+      setTasks((current) =>
+        current.map((item) => (item.id === task.id ? optimistic : item)),
+      );
+      try {
+        const updated = await api.updateTask(task.id, { progress: value });
+        setTasks((current) =>
+          current.map((item) => (item.id === updated.id ? updated : item)),
+        );
+        setError(null);
+        return true;
+      } catch (err) {
+        setTasks((current) =>
+          current.map((item) => (item.id === task.id ? task : item)),
+        );
+        setError(errorMessage(err));
+        return false;
+      }
+    },
+    [],
+  );
+
+  const setDue = useCallback(
+    async (task: Task, dueAt: string | null): Promise<boolean> => {
+      const optimistic: Task = { ...task, dueAt };
+      setTasks((current) =>
+        current.map((item) => (item.id === task.id ? optimistic : item)),
+      );
+      try {
+        const updated = await api.updateTask(task.id, { dueAt });
+        setTasks((current) =>
+          current.map((item) => (item.id === updated.id ? updated : item)),
+        );
+        setError(null);
+        return true;
+      } catch (err) {
+        setTasks((current) =>
+          current.map((item) => (item.id === task.id ? task : item)),
+        );
+        setError(errorMessage(err));
+        return false;
+      }
+    },
+    [],
+  );
+
+  const addMilestone = useCallback(
+    async (task: Task, text: string, progress: number): Promise<boolean> => {
+      try {
+        const updated = await api.addMilestone(task.id, text, progress);
         setTasks((current) =>
           current.map((item) => (item.id === updated.id ? updated : item)),
         );
@@ -128,6 +203,9 @@ export function useTasks() {
     addTask,
     toggleTask,
     editTask,
+    setProgress,
+    setDue,
+    addMilestone,
     removeTask,
     clearDone,
     reorder,

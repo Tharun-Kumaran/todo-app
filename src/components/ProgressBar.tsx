@@ -3,7 +3,7 @@ export function ProgressBar({ percent }: { percent: number }) {
     <div
       className="progress"
       role="progressbar"
-      aria-label="Tasks completed"
+      aria-label="Overall progress"
       aria-valuemin={0}
       aria-valuemax={100}
       aria-valuenow={percent}

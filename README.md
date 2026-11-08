@@ -51,6 +51,11 @@ Tasks live in `server/data/tasks.json`. The file is created on first run and is
 git-ignored because it contains your personal list. Writes go through a temp
 file and an atomic rename, and mutations are serialized to avoid lost updates.
 
+Each task stores `dueAt`, `progress`, and a `milestones` array. Files written by
+older versions (without those fields) are migrated on load: deadlines default
+to `null`, completed tasks to 100%, everything else to 0%, and the milestone
+list to empty.
+
 Overrides:
 
 | Variable         | Default                     | Purpose                    |
@@ -64,8 +69,10 @@ Overrides:
 | Method   | Path                         | Body                    | Result              |
 | -------- | ---------------------------- | ----------------------- | ------------------- |
 | `GET`    | `/api/tasks`                 | —                       | `{ tasks }`         |
-| `POST`   | `/api/tasks`                 | `{ text }`              | `{ task }` (201)    |
-| `PATCH`  | `/api/tasks/:id`             | `{ text?, done? }`      | `{ task }`          |
+| `GET`    | `/api/tasks/:id`             | —                       | `{ task }`          |
+| `POST`   | `/api/tasks`                 | `{ text, dueAt? }`      | `{ task }` (201)    |
+| `PATCH`  | `/api/tasks/:id`             | `{ text?, done?, dueAt?, progress? }` | `{ task }` |
+| `POST`   | `/api/tasks/:id/milestones`  | `{ text, progress? }`   | `{ task }` (201)    |
 | `DELETE` | `/api/tasks/:id`             | —                       | 204                 |
 | `POST`   | `/api/tasks/clear-completed` | —                       | `{ tasks }`         |
 | `PUT`    | `/api/tasks/order`           | `{ ids: string[] }`     | `{ tasks }`         |
@@ -84,7 +91,13 @@ time.
 ## Features
 
 - Add, complete, edit (double-click), and delete tasks
-- All / Active / Done filters with live counts and a progress bar
+- Optional deadline (date + time) when creating a task, shown as a relative
+  badge (overdue / due today / due tomorrow / date)
+- Granular progress from 0–100% per task, with 100% marking the task complete
+- Timestamped progress updates ("milestones") that record a comment together
+  with the completion percentage at that moment
+- Deadline editing and clearing from the task's details panel
+- All / Active / Done filters with live counts and an overall progress bar
 - Drag to reorder in the All view
 - Light/dark theme, following the system by default
 - `/` focuses the new-task input

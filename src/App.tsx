@@ -17,6 +17,9 @@ export default function App() {
     addTask,
     toggleTask,
     editTask,
+    setProgress,
+    setDue,
+    addMilestone,
     removeTask,
     clearDone,
     reorder,
@@ -44,7 +47,14 @@ export default function App() {
   }, [tasks, filter]);
 
   const canReorder = filter === 'all' && !loading && visible.length > 1;
-  const percent = total ? Math.round((done / total) * 100) : 0;
+  const percent = total
+    ? Math.round(
+        tasks.reduce(
+          (sum, task) => sum + (task.done ? 100 : task.progress),
+          0,
+        ) / total,
+      )
+    : 0;
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -126,6 +136,9 @@ export default function App() {
               dragOver={dragOverId === task.id && draggingId !== task.id}
               onToggle={() => void toggleTask(task)}
               onEdit={(text) => editTask(task.id, text)}
+              onProgress={(progress) => setProgress(task, progress)}
+              onDue={(dueAt) => setDue(task, dueAt)}
+              onMilestone={(text, progress) => addMilestone(task, text, progress)}
               onDelete={() => void removeTask(task.id)}
               onDragStart={() => setDraggingId(task.id)}
               onDragOver={() => setDragOverId(task.id)}
