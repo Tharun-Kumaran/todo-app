@@ -52,34 +52,43 @@ Runtime data lives in `server/data/` and is git-ignored because it is personal:
 
 | File            | Contents                                                 |
 | --------------- | -------------------------------------------------------- |
-| `tasks.json`    | Tasks, each mapped to a `userId`                         |
+| `tasks.json`    | Tasks, each mapped to a `userId` and optional `teamId`   |
 | `users.json`    | Accounts: id, email, salt, and scrypt password hash      |
 | `sessions.json` | Active sessions as SHA-256 token hashes with expiry      |
+| `teams.json`    | Teams: id, name, owner, and members list                 |
 
 Writes go through a temp file and an atomic rename, and mutations are
 serialized to avoid lost updates.
 
-Each task stores `userId`, `dueAt`, `progress`, `completedAt`, and a
-`milestones` array. `completedAt` is stamped when a task becomes complete and
-cleared when it is reopened. Files written by older versions are migrated on
-load: deadlines and completion timestamps default to `null` (with completed
-tasks using `updatedAt` as their completion time), completed tasks to 100%,
-everything else to 0%, and the milestone list to empty. Tasks created before
-accounts existed have no `userId`; the first account to register claims them.
+Each task stores `userId`, `creatorEmail`, `teamId`, `assigneeEmail`, `dueAt`,
+`progress`, `completedAt`, and a `milestones` array. `completedAt` is stamped
+when a task becomes complete and cleared when it is reopened. Files written by
+older versions are migrated on load: deadlines and completion timestamps
+default to `null` (with completed tasks using `updatedAt` as their completion
+time), completed tasks to 100%, everything else to 0%, and the milestone list
+to empty. Tasks created before accounts existed have no `userId`; the first
+account to register claims them.
 
 Overrides:
 
-| Variable              | Default                  | Purpose                              |
-| --------------------- | ------------------------ | ------------------------------------ |
-| `PORT`                | `3001`                   | API/UI port in production            |
-| `TODO_DATA_FILE`      | `server/data/tasks.json` | Location of the task store           |
-| `TODO_USERS_FILE`     | `server/data/users.json` | Location of the account store        |
-| `TODO_SESSIONS_FILE`  | `server/data/sessions.json` | Location of the session store     |
-| `TODO_SESSION_DAYS`   | `30`                     | Session lifetime (1–365 days)        |
-| `TODO_COOKIE_SAMESITE`| `lax`                    | Set to `none` for cross-site cookies |
-| `TODO_COOKIE_SECURE`  | auto over HTTPS          | Force the `Secure` cookie flag       |
-| `TODO_CORS_ORIGIN`    | unset                    | Allow one browser origin with cookies|
-| `VITE_API_BASE_URL`   | same-origin `/api`       | API URL for a remote setup           |
+| Variable              | Default                     | Purpose                              |
+| --------------------- | --------------------------- | ------------------------------------ |
+| `PORT`                | `3001`                      | API/UI port in production            |
+| `TODO_DATA_FILE`      | `server/data/tasks.json`    | Location of the task store           |
+| `TODO_USERS_FILE`     | `server/data/users.json`    | Location of the account store        |
+| `TODO_SESSIONS_FILE`  | `server/data/sessions.json` | Location of the session store        |
+| `TODO_TEAMS_FILE`     | `server/data/teams.json`    | Location of the teams store          |
+| `TODO_SESSION_DAYS`   | `30`                        | Session lifetime (1–365 days)        |
+| `TODO_COOKIE_SAMESITE`| `lax`                       | Set to `none` for cross-site cookies |
+| `TODO_COOKIE_SECURE`  | auto over HTTPS             | Force the `Secure` cookie flag       |
+| `TODO_CORS_ORIGIN`    | unset                       | Allow one browser origin with cookies|
+| `VITE_API_BASE_URL`   | same-origin `/api`          | API URL for a remote setup           |
+
+## Workspaces: Personal vs Team
+
+The application supports distinct workspaces via the sidebar:
+- **My Tasks**: Private workspace. Tasks are only visible to and editable by the account owner.
+- **Teams**: Shared workspaces created by a host (owner). Members are invited via email and can collaborate on shared tasks, assign tasks to members, set deadlines, and track real-time progress and milestone updates across concurrent browser sessions.
 
 ## Authentication
 
@@ -89,31 +98,43 @@ creates an opaque random session token in an `HttpOnly`, `SameSite=Lax` cookie
 (`Secure` over HTTPS). Only a SHA-256 hash of each token is saved, and sessions
 expire after 30 days by default.
 
-Every `/api/tasks` route requires a session and is scoped to that user, so one
-account can never read, edit, complete, reorder, or delete another account's
-tasks. The first account to register adopts tasks written before accounts were
-introduced.
+Every `/api/tasks` route requires a session. Personal tasks are scoped strictly
+to the authenticated user. Team tasks are scoped to verified members of that
+team.
 
 ## API
 
-All `/api/tasks` routes require the session cookie and only affect the
-signed-in user's tasks. Unauthenticated requests get `401`.
+All `/api/tasks` and `/api/teams` routes require the session cookie.
+Unauthenticated requests get `401`.
 
-| Method   | Path                         | Body                    | Result              |
-| -------- | ---------------------------- | ----------------------- | ------------------- |
-| `POST`   | `/api/auth/register`         | `{ email, password }`   | `{ user }` (201)    |
-| `POST`   | `/api/auth/login`            | `{ email, password }`   | `{ user }`          |
-| `GET`    | `/api/auth/me`               | —                       | `{ user }`          |
-| `POST`   | `/api/auth/logout`           | —                       | 204                 |
-| `GET`    | `/api/tasks`                 | —                       | `{ tasks }`         |
-| `GET`    | `/api/tasks/:id`             | —                       | `{ task }`          |
-| `POST`   | `/api/tasks`                 | `{ text, dueAt? }`      | `{ task }` (201)    |
-| `PATCH`  | `/api/tasks/:id`             | `{ text?, done?, dueAt?, progress? }` | `{ task }` |
-| `POST`   | `/api/tasks/:id/milestones`  | `{ text, progress? }`   | `{ task }` (201)    |
-| `DELETE` | `/api/tasks/:id`             | —                       | 204                 |
-| `POST`   | `/api/tasks/clear-completed` | —                       | `{ tasks }`         |
-| `PUT`    | `/api/tasks/order`           | `{ ids: string[] }`     | `{ tasks }`         |
-| `GET`    | `/api/health`                | —                       | `{ ok, tasks }`     |
+| Method   | Path                                  | Body                                                  | Result           |
+| -------- | ------------------------------------- | ----------------------------------------------------- | ---------------- |
+| `POST`   | `/api/auth/register`                  | `{ email, password }`                                 | `{ user }` (201) |
+| `POST`   | `/api/auth/login`                     | `{ email, password }`                                 | `{ user }`       |
+| `GET`    | `/api/auth/me`                        | —                                                     | `{ user }`       |
+| `POST`   | `/api/auth/logout`                    | —                                                     | 204              |
+| `GET`    | `/api/teams`                          | —                                                     | `{ teams }`      |
+| `POST`   | `/api/teams`                          | `{ name }`                                            | `{ team }` (201) |
+| `GET`    | `/api/teams/:id`                      | —                                                     | `{ team }`       |
+| `POST`   | `/api/teams/:id/members`              | `{ email }`                                           | `{ team }` (201) |
+| `DELETE` | `/api/teams/:id/members/:email`       | —                                                     | `{ team }`       |
+| `GET`    | `/api/tasks(?teamId=...)`             | —                                                     | `{ tasks }`      |
+| `GET`    | `/api/tasks/:id`                      | —                                                     | `{ task }`       |
+| `POST`   | `/api/tasks`                          | `{ text, dueAt?, teamId?, assigneeEmail? }`           | `{ task }` (201) |
+| `PATCH`  | `/api/tasks/:id`                      | `{ text?, done?, dueAt?, progress?, assigneeEmail? }` | `{ task }`       |
+| `POST`   | `/api/tasks/:id/milestones`           | `{ text, progress? }`                                 | `{ task }` (201) |
+| `DELETE` | `/api/tasks/:id`                      | —                                                     | 204              |
+| `POST`   | `/api/tasks/clear-completed(?teamId)` | —                                                     | `{ tasks }`      |
+| `PUT`    | `/api/tasks/order(?teamId=...)`       | `{ ids: string[] }`                                   | `{ tasks }`      |
+| `GET`    | `/api/health`                         | —                                                     | `{ ok }`         |
+
+## Testing
+
+Run the integration and end-to-end test suite:
+
+```bash
+npm test
+```
 
 ## Deploying the frontend
 
