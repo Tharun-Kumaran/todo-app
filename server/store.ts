@@ -22,6 +22,8 @@ export interface TaskPatch {
   category?: TaskCategory | null;
   progress?: number;
   assigneeEmail?: string | null;
+  scheduledStartAt?: string | null;
+  reminderAt?: string | null;
 }
 
 /**
@@ -108,6 +110,8 @@ export class TaskStore {
     assigneeEmail?: string | null,
     priority?: Priority | null,
     category?: TaskCategory | null,
+    scheduledStartAt?: string | null,
+    reminderAt?: string | null,
   ): Promise<Task> {
     const now = new Date().toISOString();
     const task: StoredTask = {
@@ -124,6 +128,9 @@ export class TaskStore {
       updatedAt: now,
       completedAt: null,
       dueAt,
+      scheduledStartAt: scheduledStartAt || null,
+      reminderAt: reminderAt || null,
+      version: 1,
       progress: 0,
       milestones: [],
     };
@@ -150,6 +157,7 @@ export class TaskStore {
       const updated: StoredTask = {
         ...current,
         ...patch,
+        version: (current.version ?? 1) + 1,
         updatedAt: now,
       };
 
@@ -203,6 +211,51 @@ export class TaskStore {
         done: value >= 100,
         completedAt: value >= 100 ? (current.completedAt ?? now) : null,
         milestones: [...current.milestones, milestone],
+        version: (current.version ?? 1) + 1,
+        updatedAt: now,
+      };
+
+      const next = [...tasks];
+      next[index] = updated;
+      return { next, result: toTask(updated) };
+    });
+  }
+
+  /**
+   * Add several checkpoints in one atomic write. Used when a user applies a
+   * "split into checkpoints" Time Machine recommendation.
+   */
+  addMilestones(
+    userId: string,
+    id: string,
+    userTeamIds: string[],
+    entries: Array<{ text: string; progress: number }>,
+  ): Promise<Task | null> {
+    return this.mutate((tasks) => {
+      const index = tasks.findIndex(
+        (task) => task.id === id && this.canAccess(task, userId, userTeamIds),
+      );
+      if (index === -1) return { next: tasks, result: null };
+
+      const current = tasks[index];
+      const now = new Date().toISOString();
+      const milestones: Milestone[] = entries.map((entry) => ({
+        id: randomUUID(),
+        text: entry.text,
+        progress: clamp(entry.progress),
+        createdAt: now,
+      }));
+      const value = clamp(
+        Math.max(current.progress, ...milestones.map((entry) => entry.progress)),
+      );
+
+      const updated: StoredTask = {
+        ...current,
+        progress: value,
+        done: value >= 100,
+        completedAt: value >= 100 ? (current.completedAt ?? now) : current.completedAt,
+        milestones: [...current.milestones, ...milestones],
+        version: (current.version ?? 1) + 1,
         updatedAt: now,
       };
 
@@ -350,6 +403,9 @@ function toTask(task: StoredTask): Task {
     assigneeEmail: task.assigneeEmail ?? null,
     priority: task.priority ?? 'Medium',
     category: task.category ?? null,
+    scheduledStartAt: task.scheduledStartAt ?? null,
+    reminderAt: task.reminderAt ?? null,
+    version: task.version ?? 1,
     milestones: task.milestones.map((entry) => ({ ...entry })),
   };
 }
@@ -423,6 +479,20 @@ function normalizeTask(value: unknown): StoredTask | null {
       typeof task.dueAt === 'string' && !Number.isNaN(Date.parse(task.dueAt))
         ? task.dueAt
         : null,
+    scheduledStartAt:
+      typeof task.scheduledStartAt === 'string' &&
+      !Number.isNaN(Date.parse(task.scheduledStartAt))
+        ? task.scheduledStartAt
+        : null,
+    reminderAt:
+      typeof task.reminderAt === 'string' &&
+      !Number.isNaN(Date.parse(task.reminderAt))
+        ? task.reminderAt
+        : null,
+    version:
+      typeof task.version === 'number' && Number.isFinite(task.version)
+        ? Math.max(1, Math.round(task.version))
+        : 1,
     progress,
     milestones: Array.isArray(task.milestones)
       ? task.milestones

@@ -1,11 +1,17 @@
 import {
+  useCallback,
   useEffect,
   useRef,
   useState,
   type FormEvent,
   type KeyboardEvent,
 } from 'react';
-import type { Task, TeamMember } from '../../shared/types';
+import type {
+  Task,
+  TeamMember,
+  TimeMachineRecommendation,
+  TimeMachineResponse,
+} from '../../shared/types';
 import {
   describeDue,
   formatDateTime,
@@ -14,6 +20,8 @@ import {
   toDateTimeLocal,
 } from '../format';
 import { CalendarIcon, CheckIcon, ChevronIcon, TrashIcon } from './icons';
+import { TimeMachineCard } from './TimeMachineCard';
+import * as api from '../api';
 
 interface Props {
   task: Task;
@@ -27,6 +35,7 @@ interface Props {
   onProgress: (progress: number) => Promise<boolean>;
   onDue: (dueAt: string | null) => Promise<boolean>;
   onMilestone: (text: string, progress: number) => Promise<boolean>;
+  onTaskReplaced?: (task: Task) => void;
   onDelete: () => void;
   onDragStart: () => void;
   onDragOver: () => void;
@@ -46,6 +55,7 @@ export function TaskItem({
   onProgress,
   onDue,
   onMilestone,
+  onTaskReplaced,
   onDelete,
   onDragStart,
   onDragOver,
@@ -63,6 +73,11 @@ export function TaskItem({
   const [milestoneProgress, setMilestoneProgress] = useState(task.progress);
   const [milestoneBusy, setMilestoneBusy] = useState(false);
   const [assigneeBusy, setAssigneeBusy] = useState(false);
+  const [timeMachine, setTimeMachine] = useState<TimeMachineResponse | null>(
+    null,
+  );
+  const [timeMachineLoading, setTimeMachineLoading] = useState(false);
+  const [timeMachineError, setTimeMachineError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const editingRef = useRef(false);
   const cancelRef = useRef(false);
@@ -94,6 +109,77 @@ export function TaskItem({
   useEffect(() => {
     setDueDraft(toDateTimeLocal(task.dueAt));
   }, [task.dueAt]);
+
+  const loadTimeMachine = useCallback(async () => {
+    setTimeMachineLoading(true);
+    setTimeMachineError(null);
+    try {
+      const response = await api.fetchTimeMachine(task.id);
+      setTimeMachine(response);
+      const ids = response.recommendations.map(
+        (recommendation) => recommendation.id,
+      );
+      if (ids.length > 0) {
+        void api.recordRecommendationImpressions(ids).catch(() => {});
+      }
+    } catch (error) {
+      setTimeMachineError(
+        error instanceof Error ? error.message : 'Time Machine unavailable.',
+      );
+    } finally {
+      setTimeMachineLoading(false);
+    }
+  }, [task.id]);
+
+  useEffect(() => {
+    if (!expanded) return;
+    void loadTimeMachine();
+  }, [expanded, loadTimeMachine, task.version]);
+
+  async function applyTimeMachineRecommendation(
+    recommendation: TimeMachineRecommendation,
+  ): Promise<boolean> {
+    setTimeMachineError(null);
+    try {
+      const result = await api.applyRecommendation(
+        recommendation.id,
+        task.version,
+      );
+      setTimeMachine(result.timeMachine);
+      onTaskReplaced?.(result.task);
+      return true;
+    } catch (error) {
+      setTimeMachineError(
+        error instanceof Error ? error.message : 'Could not apply recommendation.',
+      );
+      return false;
+    }
+  }
+
+  async function dismissTimeMachineRecommendation(
+    recommendation: TimeMachineRecommendation,
+  ): Promise<void> {
+    setTimeMachineError(null);
+    try {
+      await api.dismissRecommendation(recommendation.id, 'not_useful');
+      setTimeMachine((current) =>
+        current
+          ? {
+              ...current,
+              recommendations: current.recommendations.filter(
+                (entry) => entry.id !== recommendation.id,
+              ),
+            }
+          : current,
+      );
+    } catch (error) {
+      setTimeMachineError(
+        error instanceof Error
+          ? error.message
+          : 'Could not dismiss recommendation.',
+      );
+    }
+  }
 
   function openEditor() {
     editingRef.current = true;
@@ -400,6 +486,18 @@ export function TaskItem({
                 )}
               </div>
             </section>
+          </div>
+
+          <div className="tm-detail-wrap">
+            <TimeMachineCard
+              timeMachine={timeMachine}
+              loading={timeMachineLoading}
+              error={timeMachineError}
+              teamTask={Boolean(task.teamId)}
+              onApply={applyTimeMachineRecommendation}
+              onDismiss={dismissTimeMachineRecommendation}
+              onRetry={() => void loadTimeMachine()}
+            />
           </div>
 
           <section className="detail-card">

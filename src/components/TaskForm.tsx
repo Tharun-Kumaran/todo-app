@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { composeDueAt, describeDue } from '../format';
 import { CalendarIcon, PlusIcon } from './icons';
+import { TimeMachineCard } from './TimeMachineCard';
 import type {
   PredictionResponse,
   Priority,
   RecommendationOption,
   TaskCategory,
   TeamMember,
+  TimeMachineRecommendation,
+  TimeMachineResponse,
 } from '../../shared/types';
 import * as api from '../api';
 
@@ -17,6 +20,8 @@ interface Props {
     assigneeEmail?: string | null,
     priority?: Priority | null,
     category?: TaskCategory | null,
+    scheduledStartAt?: string | null,
+    reminderAt?: string | null,
   ) => Promise<boolean>;
   teamMembers?: TeamMember[];
 }
@@ -50,7 +55,12 @@ export function TaskForm({ onAdd, teamMembers }: Props) {
 
   // Prediction engine state
   const [prediction, setPrediction] = useState<PredictionResponse | null>(null);
+  const [timeMachine, setTimeMachine] = useState<TimeMachineResponse | null>(
+    null,
+  );
   const [isPredicting, setIsPredicting] = useState(false);
+  const [scheduledStartAt, setScheduledStartAt] = useState<string | null>(null);
+  const [reminderAt, setReminderAt] = useState<string | null>(null);
 
   const preview = useMemo(
     () => describeDue(composeDueAt(dueDate, dueTime), false),
@@ -62,6 +72,7 @@ export function TaskForm({ onAdd, teamMembers }: Props) {
     const trimmed = text.trim();
     if (trimmed.length < 3) {
       setPrediction(null);
+      setTimeMachine(null);
       return;
     }
 
@@ -75,9 +86,11 @@ export function TaskForm({ onAdd, teamMembers }: Props) {
           dueAt: composeDueAt(dueDate, dueTime),
           priority,
           category: category ? (category as TaskCategory) : undefined,
+          teamTask: Boolean(teamMembers),
         });
         if (active) {
-          setPrediction(result);
+          setPrediction(result.prediction);
+          setTimeMachine(result.timeMachine);
           setIsPredicting(false);
         }
       } catch {
@@ -109,6 +122,8 @@ export function TaskForm({ onAdd, teamMembers }: Props) {
       assigneeEmail || null,
       priority,
       category ? (category as TaskCategory) : null,
+      scheduledStartAt,
+      reminderAt,
     );
     setBusy(false);
     if (added) {
@@ -119,6 +134,9 @@ export function TaskForm({ onAdd, teamMembers }: Props) {
       setPriority('Medium');
       setCategory('');
       setPrediction(null);
+      setTimeMachine(null);
+      setScheduledStartAt(null);
+      setReminderAt(null);
     }
   }
 
@@ -140,6 +158,40 @@ export function TaskForm({ onAdd, teamMembers }: Props) {
         setText((prev) => `${prev} [Part 1/2]`);
       }
     }
+  }
+
+  async function handleApplyTimeMachine(
+    recommendation: TimeMachineRecommendation,
+  ): Promise<boolean> {
+    if (recommendation.type === 'deadline_change' && recommendation.payload.dueAt) {
+      const d = new Date(recommendation.payload.dueAt);
+      const pad = (n: number) => String(n).padStart(2, '0');
+      setDueDate(`${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`);
+      setDueTime(`${pad(d.getHours())}:${pad(d.getMinutes())}`);
+      return true;
+    }
+    if (
+      recommendation.type === 'schedule_window' &&
+      recommendation.payload.scheduledStartAt
+    ) {
+      setScheduledStartAt(recommendation.payload.scheduledStartAt);
+      return true;
+    }
+    if (recommendation.type === 'reminder' && recommendation.payload.reminderAt) {
+      setReminderAt(recommendation.payload.reminderAt);
+      return true;
+    }
+    if (
+      recommendation.type === 'split_subtasks' &&
+      recommendation.payload.milestones
+    ) {
+      const checkpoints = recommendation.payload.milestones
+        .map((checkpoint) => `• ${checkpoint}`)
+        .join('\n');
+      setText((prev) => `${prev}\n\nCheckpoints:\n${checkpoints}`.slice(0, 500));
+      return true;
+    }
+    return false;
   }
 
   return (
@@ -317,6 +369,14 @@ export function TaskForm({ onAdd, teamMembers }: Props) {
           )}
         </div>
       )}
+
+      <TimeMachineCard
+        timeMachine={timeMachine}
+        loading={isPredicting}
+        compact
+        teamTask={Boolean(teamMembers)}
+        onApply={handleApplyTimeMachine}
+      />
     </form>
   );
 }

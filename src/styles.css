@@ -2179,3 +2179,362 @@ h1 {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Time Machine v2 */
+.tm-detail-wrap {
+  grid-column: 1 / -1;
+}
+
+.time-machine-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 13px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  animation: fadeIn 0.25s ease-out;
+}
+
+.time-machine-card.compact {
+  margin: 10px 14px 14px;
+  background: var(--card);
+}
+
+.time-machine-card.risk-high {
+  border-color: rgba(239, 68, 68, 0.35);
+  background: linear-gradient(180deg, rgba(239, 68, 68, 0.08), transparent 55%);
+}
+
+.time-machine-card.risk-medium {
+  border-color: rgba(245, 158, 11, 0.35);
+  background: linear-gradient(180deg, rgba(245, 158, 11, 0.08), transparent 55%);
+}
+
+.time-machine-card.risk-low {
+  border-color: rgba(16, 185, 129, 0.35);
+  background: linear-gradient(180deg, rgba(16, 185, 129, 0.07), transparent 55%);
+}
+
+.tm-loading,
+.tm-error {
+  flex-direction: row;
+  align-items: center;
+  gap: 9px;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.tm-error {
+  flex-direction: column;
+  align-items: flex-start;
+  color: var(--danger);
+}
+
+.tm-error p {
+  margin: 0;
+}
+
+.tm-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.tm-eyebrow {
+  display: block;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.tm-probability {
+  margin: 2px 0 0;
+  font-size: 30px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.tm-probability-label {
+  display: block;
+  margin-top: 3px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.tm-head-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+  text-align: right;
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.tm-confidence {
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  font-weight: 700;
+  font-size: 10.5px;
+}
+
+.tm-confidence-high {
+  color: #2f8f5b;
+  border-color: rgba(47, 143, 91, 0.35);
+}
+
+.tm-confidence-medium {
+  color: #b7791f;
+  border-color: rgba(183, 121, 31, 0.35);
+}
+
+.tm-confidence-low {
+  color: var(--muted);
+}
+
+.tm-interval,
+.tm-mode {
+  font-variant-numeric: tabular-nums;
+}
+
+.tm-window {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.tm-window strong {
+  color: var(--text);
+  font-weight: 650;
+}
+
+.tm-window-sep {
+  opacity: 0.45;
+}
+
+.tm-reasons,
+.tm-rec-reasons {
+  margin: 0;
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+}
+
+.tm-evidence {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 7px;
+  border-top: 1px dashed var(--line);
+}
+
+.tm-evidence-label {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.tm-evidence ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.tm-evidence li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11.5px;
+}
+
+.tm-evidence-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.tm-evidence-meta {
+  flex: none;
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.tm-note {
+  margin: 0;
+  padding-top: 7px;
+  border-top: 1px dashed var(--line);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.tm-recommendation {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
+}
+
+.tm-rec-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.tm-rec-label {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.tm-rec-lift {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.tm-rec-lift strong {
+  font-weight: 800;
+}
+
+.tm-rec-meta {
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.tm-meta-sep {
+  margin: 0 5px;
+  opacity: 0.5;
+}
+
+.tm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.tm-apply {
+  padding: 5px 11px;
+  border: 1px solid var(--accent);
+  border-radius: 7px;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: opacity 0.15s, transform 0.15s;
+}
+
+.tm-apply:hover:not(:disabled) {
+  transform: translateY(-1px);
+  opacity: 0.92;
+}
+
+.tm-apply:disabled,
+.tm-dismiss:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.tm-alternatives {
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.tm-alternatives li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+}
+
+.tm-alt-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  font-size: 11.5px;
+}
+
+.tm-alt-copy span {
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.tm-alt-actions {
+  display: flex;
+  flex: none;
+  gap: 5px;
+}
+
+.tm-footer {
+  padding-top: 7px;
+  border-top: 1px dashed var(--line);
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+@media (max-width: 620px) {
+  .tm-head,
+  .tm-rec-head,
+  .tm-alternatives li {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .tm-head-meta {
+    align-items: flex-start;
+    text-align: left;
+  }
+
+  .tm-probability {
+    font-size: 26px;
+  }
+
+  .tm-alt-actions {
+    justify-content: flex-start;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .time-machine-card,
+  .tm-apply {
+    animation: none;
+    transition: none;
+  }
+}

@@ -2,9 +2,13 @@ import type {
   PredictionRequest,
   PredictionResponse,
   Priority,
+  RecommendationApplyResponse,
+  RecurringSeries,
   Task,
   TaskCategory,
   Team,
+  TimeMachineInsights,
+  TimeMachineResponse,
   User,
 } from '../shared/types';
 
@@ -70,6 +74,13 @@ export interface TaskPatch {
   category?: TaskCategory | null;
   progress?: number;
   assigneeEmail?: string | null;
+  scheduledStartAt?: string | null;
+  reminderAt?: string | null;
+}
+
+export interface PredictionPreview {
+  prediction: PredictionResponse;
+  timeMachine: TimeMachineResponse | null;
 }
 
 // --- Authentication -------------------------------------------------------
@@ -158,6 +169,8 @@ export function createTask(
   assigneeEmail?: string | null,
   priority?: Priority | null,
   category?: TaskCategory | null,
+  scheduledStartAt?: string | null,
+  reminderAt?: string | null,
 ): Promise<Task> {
   return request<{ task: Task }>('/api/tasks', {
     method: 'POST',
@@ -168,17 +181,20 @@ export function createTask(
       assigneeEmail: assigneeEmail || null,
       priority: priority || 'Medium',
       category: category || null,
+      scheduledStartAt: scheduledStartAt || null,
+      reminderAt: reminderAt || null,
     }),
   }).then((data) => data.task);
 }
 
-export function predictTask(
-  data: PredictionRequest,
-): Promise<PredictionResponse> {
-  return request<{ prediction: PredictionResponse }>('/api/tasks/predict', {
+export function predictTask(data: PredictionRequest): Promise<PredictionPreview> {
+  return request<PredictionPreview>('/api/tasks/predict', {
     method: 'POST',
     body: JSON.stringify(data),
-  }).then((data) => data.prediction);
+  }).then((response) => ({
+    prediction: response.prediction,
+    timeMachine: response.timeMachine ?? null,
+  }));
 }
 
 export function updateTask(id: string, patch: TaskPatch): Promise<Task> {
@@ -224,4 +240,58 @@ export function reorderTasks(
     method: 'PUT',
     body: JSON.stringify({ ids }),
   }).then((data) => data.tasks);
+}
+
+// --- Time Machine ---------------------------------------------------------
+
+export function fetchTimeMachine(taskId: string): Promise<TimeMachineResponse> {
+  return request<{ timeMachine: TimeMachineResponse }>(
+    `/api/tasks/${encodeURIComponent(taskId)}/time-machine`,
+  ).then((data) => data.timeMachine);
+}
+
+export function applyRecommendation(
+  id: string,
+  expectedVersion: number,
+): Promise<RecommendationApplyResponse> {
+  return request<RecommendationApplyResponse>(
+    `/api/recommendations/${encodeURIComponent(id)}/apply`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ expectedVersion }),
+    },
+  );
+}
+
+export function dismissRecommendation(
+  id: string,
+  reason?: 'not_useful' | 'too_busy' | 'wrong' | 'other',
+): Promise<void> {
+  return request<void>(
+    `/api/recommendations/${encodeURIComponent(id)}/dismiss`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    },
+  );
+}
+
+export function recordRecommendationImpressions(ids: string[]): Promise<void> {
+  if (ids.length === 0) return Promise.resolve();
+  return request<void>('/api/recommendations/impressions', {
+    method: 'POST',
+    body: JSON.stringify({ ids }),
+  });
+}
+
+export function fetchTimeMachineInsights(): Promise<TimeMachineInsights> {
+  return request<{ insights: TimeMachineInsights }>(
+    '/api/time-machine/insights',
+  ).then((data) => data.insights);
+}
+
+export function fetchSeries(): Promise<RecurringSeries[]> {
+  return request<{ series: RecurringSeries[] }>('/api/series').then(
+    (data) => data.series,
+  );
 }

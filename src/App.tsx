@@ -69,6 +69,7 @@ function TodoApp({ user, onSignOut }: TodoAppProps) {
     loading,
     error,
     refresh,
+    replaceTask,
     addTask,
     toggleTask,
     editTask,
@@ -247,6 +248,7 @@ function TodoApp({ user, onSignOut }: TodoAppProps) {
                 onMilestone={(text, progress) =>
                   addMilestone(task, text, progress)
                 }
+                onTaskReplaced={replaceTask}
                 onDelete={() => void removeTask(task.id)}
                 onDragStart={() => setDraggingId(task.id)}
                 onDragOver={() => setDragOverId(task.id)}

@@ -62,10 +62,125 @@ export interface Task {
   priority?: Priority | null;
   /** Task category / department. */
   category?: TaskCategory | null;
+  /** Optional planned work window chosen from a Time Machine recommendation. */
+  scheduledStartAt?: string | null;
+  /** Optional in-app reminder time chosen from a Time Machine recommendation. */
+  reminderAt?: string | null;
+  /** Optimistic-concurrency version, incremented on every mutation. */
+  version: number;
   /** Current completion percentage (0-100). */
   progress: number;
   /** Timestamped progress updates, oldest first. */
   milestones: Milestone[];
+}
+
+export type RiskLevel = 'LOW' | 'MEDIUM' | 'HIGH';
+export type Confidence = 'low' | 'medium' | 'high';
+export type RecommendationType =
+  | 'deadline_change'
+  | 'schedule_window'
+  | 'split_subtasks'
+  | 'reminder'
+  | 'recurrence_series';
+
+export interface PredictionEvidence {
+  taskId: string;
+  text: string;
+  similarity: number;
+  outcome: 'on_time' | 'late' | 'overdue';
+  durationDays: number | null;
+}
+
+export interface TimeMachineBaseline {
+  /** Probability of completing by the deadline, or within 7 days when no deadline exists. */
+  completionProbability: number;
+  /** 80% interval for the probability. */
+  interval: [number, number];
+  deadline: string | null;
+  expectedCompletion: { p50: string; p80: string } | null;
+  riskLevel: RiskLevel;
+  confidence: Confidence;
+  sampleSize: number;
+  mode: 'personal' | 'blended' | 'global';
+  reasons: string[];
+  evidence: PredictionEvidence[];
+}
+
+export interface TimeMachineRecommendation {
+  id: string;
+  type: RecommendationType;
+  label: string;
+  payload: {
+    dueAt?: string;
+    scheduledStartAt?: string;
+    milestones?: string[];
+    reminderAt?: string;
+    rrule?: string;
+    title?: string;
+  };
+  baselineProbability: number;
+  recommendedProbability: number;
+  lift: number;
+  confidence: Confidence;
+  /** False when the action is structural and there is not enough data for a numeric lift. */
+  estimated: boolean;
+  reasons: string[];
+}
+
+export interface TimeMachineResponse {
+  taskId: string;
+  generatedAt: string;
+  model: {
+    version: string;
+    mode: 'personal' | 'blended' | 'global';
+    sampleSize: number;
+    confidence: Confidence;
+  };
+  baseline: TimeMachineBaseline;
+  recommendations: TimeMachineRecommendation[];
+  holdout: boolean;
+}
+
+export type RecommendationStatus =
+  | 'active'
+  | 'accepted'
+  | 'dismissed'
+  | 'expired'
+  | 'superseded';
+
+export interface RecurringSeries {
+  id: string;
+  userId: string;
+  title: string;
+  rrule: string;
+  timezone: string;
+  autoCreate: boolean;
+  status: 'suggested' | 'active' | 'paused' | 'ended';
+  nextAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RecommendationApplyResponse {
+  task: Task;
+  timeMachine: TimeMachineResponse;
+  recommendation: TimeMachineRecommendation;
+  series?: RecurringSeries;
+}
+
+export interface TimeMachineInsights {
+  resolved: number;
+  brier: number | null;
+  baselineBrier: number | null;
+  calibrationError: number | null;
+  coldStart: boolean;
+  recommendations: {
+    shown: number;
+    accepted: number;
+    dismissed: number;
+    acceptanceRate: number | null;
+  };
+  patterns: Array<{ label: string; detail: string; sampleSize: number }>;
 }
 
 export interface RecommendationOption {
@@ -80,6 +195,8 @@ export interface PredictionRequest {
   dueAt?: string | null;
   priority?: Priority;
   category?: TaskCategory;
+  teamId?: string | null;
+  teamTask?: boolean;
 }
 
 export interface PredictionResponse {

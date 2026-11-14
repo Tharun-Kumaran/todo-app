@@ -12,6 +12,21 @@ import { TaskStore, type TaskPatch } from './store';
 import { UserStore, normalizeEmail, passwordProblem } from './users';
 import { TeamStore } from './teams';
 import { predictTaskFeasibility } from './prediction';
+import { TimeMachineStore } from './timeMachineStore';
+import {
+  TimeMachineError,
+  applyRecommendation,
+  dismissRecommendation,
+  getInsights,
+  getTimeMachineForTask,
+  handleTaskDeleted,
+  handleTaskUpdate,
+  previewTimeMachine,
+  recordImpressions,
+  recordTaskCreated,
+  resolveUserOutcomes,
+} from './timeMachineService';
+import type { TimeMachineTaskInput } from './timeMachine';
 import {
   SESSION_COOKIE,
   SessionStore,
@@ -35,6 +50,9 @@ const sessionsFile = process.env.TODO_SESSIONS_FILE
 const teamsFile = process.env.TODO_TEAMS_FILE
   ? path.resolve(process.env.TODO_TEAMS_FILE)
   : path.join(dataDir, 'teams.json');
+const timeMachineFile = process.env.TODO_TIME_MACHINE_FILE
+  ? path.resolve(process.env.TODO_TIME_MACHINE_FILE)
+  : path.join(dataDir, 'time-machine.json');
 
 const port = Number(process.env.PORT) || 3001;
 const maxTextLength = 500;
@@ -50,7 +68,15 @@ const store = new TaskStore(dataFile);
 const users = new UserStore(usersFile);
 const sessions = new SessionStore(sessionsFile, sessionTtlMs);
 const teams = new TeamStore(teamsFile);
-await Promise.all([store.init(), users.init(), sessions.init(), teams.init()]);
+const timeMachineStore = new TimeMachineStore(timeMachineFile);
+const timeMachineDeps = { tasks: store, timeMachine: timeMachineStore };
+await Promise.all([
+  store.init(),
+  users.init(),
+  sessions.init(),
+  teams.init(),
+  timeMachineStore.init(),
+]);
 
 const app = express();
 app.disable('x-powered-by');
@@ -96,6 +122,25 @@ function parseDueAt(value: unknown): Parsed<string | null | undefined> {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
     return { ok: false, error: '`dueAt` must be a valid ISO date string or null.' };
+  }
+  return { ok: true, value: date.toISOString() };
+}
+
+function parseDateField(
+  value: unknown,
+  field: string,
+): Parsed<string | null | undefined> {
+  if (value === undefined) return { ok: true, value: undefined };
+  if (value === null || value === '') return { ok: true, value: null };
+  if (typeof value !== 'string') {
+    return { ok: false, error: `\`${field}\` must be an ISO date string or null.` };
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return {
+      ok: false,
+      error: `\`${field}\` must be a valid ISO date string or null.`,
+    };
   }
   return { ok: true, value: date.toISOString() };
 }
@@ -403,6 +448,8 @@ app.post('/api/tasks', requireUser, async (req, res, next) => {
       assigneeEmail?: unknown;
       priority?: unknown;
       category?: unknown;
+      scheduledStartAt?: unknown;
+      reminderAt?: unknown;
     };
     const text = readText(body.text);
     if (!text) {
@@ -443,6 +490,20 @@ app.post('/api/tasks', requireUser, async (req, res, next) => {
       return;
     }
 
+    const scheduledStartAt = parseDateField(
+      body.scheduledStartAt,
+      'scheduledStartAt',
+    );
+    if (!scheduledStartAt.ok) {
+      res.status(400).json({ error: scheduledStartAt.error });
+      return;
+    }
+    const reminderAt = parseDateField(body.reminderAt, 'reminderAt');
+    if (!reminderAt.ok) {
+      res.status(400).json({ error: reminderAt.error });
+      return;
+    }
+
     const task = await store.add(
       currentUserId(res),
       currentUserEmail(res),
@@ -452,7 +513,23 @@ app.post('/api/tasks', requireUser, async (req, res, next) => {
       assigneeEmail,
       priority.value,
       category.value,
+      scheduledStartAt.value ?? null,
+      reminderAt.value ?? null,
     );
+
+    const history = store.listFor(currentUserId(res), null);
+    try {
+      await recordTaskCreated({
+        deps: timeMachineDeps,
+        userId: currentUserId(res),
+        task,
+        history,
+      });
+    } catch (error) {
+      // A prediction failure must never block task creation.
+      console.error('Time Machine snapshot failed:', error);
+    }
+
     res.status(201).json({ task });
   } catch (error) {
     next(error);
@@ -466,6 +543,8 @@ app.post('/api/tasks/predict', requireUser, (req, res) => {
     priority?: unknown;
     category?: unknown;
     shiftCount?: unknown;
+    teamId?: unknown;
+    teamTask?: unknown;
   };
   const text = typeof body.text === 'string' ? body.text.trim() : '';
   const dueAt =
@@ -475,6 +554,9 @@ app.post('/api/tasks/predict', requireUser, (req, res) => {
   const category =
     typeof body.category === 'string' ? (body.category as TaskCategory) : undefined;
   const shiftCount = typeof body.shiftCount === 'number' ? body.shiftCount : 0;
+  const teamTask =
+    body.teamTask === true ||
+    (typeof body.teamId === 'string' && body.teamId.length > 0);
 
   const prediction = predictTaskFeasibility({
     text,
@@ -484,7 +566,25 @@ app.post('/api/tasks/predict', requireUser, (req, res) => {
     shiftCount,
   });
 
-  res.json({ prediction });
+  const now = new Date();
+  const draft: TimeMachineTaskInput = {
+    text,
+    dueAt,
+    priority,
+    category,
+    createdAt: now.toISOString(),
+    shiftCount,
+  };
+  const timeMachine = previewTimeMachine({
+    deps: timeMachineDeps,
+    userId: currentUserId(res),
+    draft,
+    history: store.listFor(currentUserId(res), null),
+    now,
+    teamTask,
+  });
+
+  res.json({ prediction, timeMachine });
 });
 
 app.patch('/api/tasks/:id', requireUser, async (req, res, next) => {
@@ -497,6 +597,8 @@ app.patch('/api/tasks/:id', requireUser, async (req, res, next) => {
       category?: unknown;
       progress?: unknown;
       assigneeEmail?: unknown;
+      scheduledStartAt?: unknown;
+      reminderAt?: unknown;
     };
     const patch: TaskPatch = {};
 
@@ -556,8 +658,37 @@ app.patch('/api/tasks/:id', requireUser, async (req, res, next) => {
           : null;
     }
 
+    const scheduledStartAt = parseDateField(
+      body.scheduledStartAt,
+      'scheduledStartAt',
+    );
+    if (!scheduledStartAt.ok) {
+      res.status(400).json({ error: scheduledStartAt.error });
+      return;
+    }
+    if (scheduledStartAt.value !== undefined) {
+      patch.scheduledStartAt = scheduledStartAt.value;
+    }
+
+    const reminderAt = parseDateField(body.reminderAt, 'reminderAt');
+    if (!reminderAt.ok) {
+      res.status(400).json({ error: reminderAt.error });
+      return;
+    }
+    if (reminderAt.value !== undefined) patch.reminderAt = reminderAt.value;
+
     if (Object.keys(patch).length === 0) {
       res.status(400).json({ error: 'Nothing to update.' });
+      return;
+    }
+
+    const before = store.get(
+      currentUserId(res),
+      routeParam(req, 'id'),
+      currentUserTeamIds(res),
+    );
+    if (!before) {
+      res.status(404).json({ error: 'Task not found.' });
       return;
     }
 
@@ -571,6 +702,19 @@ app.patch('/api/tasks/:id', requireUser, async (req, res, next) => {
       res.status(404).json({ error: 'Task not found.' });
       return;
     }
+
+    try {
+      await handleTaskUpdate({
+        deps: timeMachineDeps,
+        userId: currentUserId(res),
+        before,
+        after: task,
+        history: store.listFor(currentUserId(res), null),
+      });
+    } catch (error) {
+      console.error('Time Machine update failed:', error);
+    }
+
     res.json({ task });
   } catch (error) {
     next(error);
@@ -592,6 +736,16 @@ app.post('/api/tasks/:id/milestones', requireUser, async (req, res, next) => {
       return;
     }
 
+    const before = store.get(
+      currentUserId(res),
+      routeParam(req, 'id'),
+      currentUserTeamIds(res),
+    );
+    if (!before) {
+      res.status(404).json({ error: 'Task not found.' });
+      return;
+    }
+
     const task = await store.addMilestone(
       currentUserId(res),
       routeParam(req, 'id'),
@@ -603,6 +757,19 @@ app.post('/api/tasks/:id/milestones', requireUser, async (req, res, next) => {
       res.status(404).json({ error: 'Task not found.' });
       return;
     }
+
+    try {
+      await handleTaskUpdate({
+        deps: timeMachineDeps,
+        userId: currentUserId(res),
+        before,
+        after: task,
+        history: store.listFor(currentUserId(res), null),
+      });
+    } catch (error) {
+      console.error('Time Machine milestone update failed:', error);
+    }
+
     res.status(201).json({ task });
   } catch (error) {
     next(error);
@@ -611,6 +778,26 @@ app.post('/api/tasks/:id/milestones', requireUser, async (req, res, next) => {
 
 app.delete('/api/tasks/:id', requireUser, async (req, res, next) => {
   try {
+    const task = store.get(
+      currentUserId(res),
+      routeParam(req, 'id'),
+      currentUserTeamIds(res),
+    );
+    if (!task) {
+      res.status(404).json({ error: 'Task not found.' });
+      return;
+    }
+
+    try {
+      await handleTaskDeleted({
+        deps: timeMachineDeps,
+        userId: currentUserId(res),
+        task,
+      });
+    } catch (error) {
+      console.error('Time Machine delete handling failed:', error);
+    }
+
     const removed = await store.remove(
       currentUserId(res),
       routeParam(req, 'id'),
@@ -639,6 +826,22 @@ app.post('/api/tasks/clear-completed', requireUser, async (req, res, next) => {
       res.status(403).json({ error: 'Not a member of this team.' });
       return;
     }
+
+    const completed = store
+      .listFor(currentUserId(res), teamId)
+      .filter((task) => task.done);
+    for (const task of completed) {
+      try {
+        await handleTaskDeleted({
+          deps: timeMachineDeps,
+          userId: currentUserId(res),
+          task,
+        });
+      } catch (error) {
+        console.error('Time Machine clear-completed handling failed:', error);
+      }
+    }
+
     res.json({ tasks: await store.clearCompleted(currentUserId(res), teamId) });
   } catch (error) {
     next(error);
@@ -669,6 +872,213 @@ app.put('/api/tasks/order', requireUser, async (req, res, next) => {
   }
 });
 
+// --- Time Machine ---------------------------------------------------------
+
+app.get('/api/tasks/:id/time-machine', requireUser, async (req, res, next) => {
+  try {
+    const userId = currentUserId(res);
+    const task = store.get(
+      userId,
+      routeParam(req, 'id'),
+      currentUserTeamIds(res),
+    );
+    if (!task) {
+      res.status(404).json({ error: 'Task not found.' });
+      return;
+    }
+
+    const history = store.listFor(userId, null);
+    await resolveUserOutcomes({ deps: timeMachineDeps, userId, tasks: history });
+    const timeMachine = await getTimeMachineForTask({
+      deps: timeMachineDeps,
+      userId,
+      task,
+      history,
+    });
+    res.json({ timeMachine });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/recommendations/impressions', requireUser, async (req, res, next) => {
+  try {
+    const ids = (req.body as { ids?: unknown } | undefined)?.ids;
+    if (
+      !Array.isArray(ids) ||
+      ids.length > 50 ||
+      !ids.every((id) => typeof id === 'string')
+    ) {
+      res
+        .status(400)
+        .json({ error: '`ids` must be an array of up to 50 recommendation ids.' });
+      return;
+    }
+    await recordImpressions({
+      deps: timeMachineDeps,
+      userId: currentUserId(res),
+      ids,
+    });
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post(
+  '/api/recommendations/:id/apply',
+  requireUser,
+  async (req, res, next) => {
+    try {
+      const userId = currentUserId(res);
+      const recommendation = timeMachineStore.getRecommendation(
+        routeParam(req, 'id'),
+      );
+      if (!recommendation || recommendation.userId !== userId) {
+        res.status(404).json({ error: 'Recommendation not found.' });
+        return;
+      }
+
+      const task = store.get(
+        userId,
+        recommendation.taskId,
+        currentUserTeamIds(res),
+      );
+      if (!task) {
+        res.status(404).json({ error: 'Task not found.' });
+        return;
+      }
+
+      const expectedVersionRaw = (req.body as { expectedVersion?: unknown } | undefined)
+        ?.expectedVersion;
+      if (
+        expectedVersionRaw !== undefined &&
+        (typeof expectedVersionRaw !== 'number' ||
+          !Number.isFinite(expectedVersionRaw))
+      ) {
+        res.status(400).json({ error: '`expectedVersion` must be a number.' });
+        return;
+      }
+
+      const result = await applyRecommendation({
+        deps: timeMachineDeps,
+        userId,
+        task,
+        userTeamIds: currentUserTeamIds(res),
+        recommendationId: routeParam(req, 'id'),
+        expectedVersion: expectedVersionRaw,
+      });
+      res.json(result);
+    } catch (error) {
+      if (error instanceof TimeMachineError) {
+        res.status(error.status).json({
+          error: error.message,
+          code: error.code,
+          details: error.details,
+        });
+        return;
+      }
+      next(error);
+    }
+  },
+);
+
+app.post(
+  '/api/recommendations/:id/dismiss',
+  requireUser,
+  async (req, res, next) => {
+    try {
+      const reason = (req.body as { reason?: unknown } | undefined)?.reason;
+      if (
+        reason !== undefined &&
+        (typeof reason !== 'string' || reason.length > 200)
+      ) {
+        res.status(400).json({ error: '`reason` must be a short string.' });
+        return;
+      }
+      const record = await dismissRecommendation({
+        deps: timeMachineDeps,
+        userId: currentUserId(res),
+        recommendationId: routeParam(req, 'id'),
+        reason: typeof reason === 'string' ? reason : undefined,
+      });
+      if (!record) {
+        res.status(404).json({ error: 'Recommendation not found.' });
+        return;
+      }
+      res.status(204).end();
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+app.get('/api/recommendations/:id', requireUser, (req, res) => {
+  const record = timeMachineStore.getRecommendation(routeParam(req, 'id'));
+  if (!record || record.userId !== currentUserId(res)) {
+    res.status(404).json({ error: 'Recommendation not found.' });
+    return;
+  }
+  res.json({ recommendation: record });
+});
+
+app.get('/api/time-machine/insights', requireUser, async (_req, res, next) => {
+  try {
+    const userId = currentUserId(res);
+    const tasks = store.listFor(userId, null);
+    const insights = await getInsights({
+      deps: timeMachineDeps,
+      userId,
+      tasks,
+    });
+    res.json({ insights });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/time-machine/outcomes', requireUser, (req, res) => {
+  const taskId =
+    typeof req.query.taskId === 'string' && req.query.taskId
+      ? req.query.taskId
+      : undefined;
+  res.json({
+    outcomes: timeMachineStore.listOutcomes(currentUserId(res), taskId),
+  });
+});
+
+app.get('/api/series', requireUser, (_req, res) => {
+  res.json({ series: timeMachineStore.listSeries(currentUserId(res)) });
+});
+
+app.get('/api/reminders', requireUser, (req, res) => {
+  const status =
+    req.query.status === 'sent' ||
+    req.query.status === 'dismissed' ||
+    req.query.status === 'scheduled'
+      ? req.query.status
+      : undefined;
+  res.json({
+    reminders: timeMachineStore.listReminders(currentUserId(res), status),
+  });
+});
+
+app.post('/api/reminders/:id/dismiss', requireUser, async (req, res, next) => {
+  try {
+    const dismissed = await timeMachineStore.dismissReminder(
+      routeParam(req, 'id'),
+      currentUserId(res),
+    );
+    if (!dismissed) {
+      res.status(404).json({ error: 'Reminder not found.' });
+      return;
+    }
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.use('/api', (_req, res) => {
   res.status(404).json({ error: 'Not found.' });
 });
@@ -683,6 +1093,14 @@ if (existsSync(distDir)) {
 }
 
 const errorHandler: ErrorRequestHandler = (error, _req, res, _next) => {
+  if (error instanceof TimeMachineError) {
+    res.status(error.status).json({
+      error: error.message,
+      code: error.code,
+      details: error.details,
+    });
+    return;
+  }
   if (error && typeof error === 'object' && 'type' in error) {
     if ((error as { type?: string }).type === 'entity.too.large') {
       res.status(413).json({ error: 'Payload too large.' });
@@ -697,7 +1115,9 @@ app.use(errorHandler);
 
 const server = app.listen(port, () => {
   console.log(`API listening on http://localhost:${port}`);
-  console.log(`Data files: ${dataFile}, ${usersFile}, ${sessionsFile}, ${teamsFile}`);
+  console.log(
+    `Data files: ${dataFile}, ${usersFile}, ${sessionsFile}, ${teamsFile}, ${timeMachineFile}`,
+  );
   if (existsSync(distDir)) {
     console.log(`Serving built UI from ${distDir}`);
   }

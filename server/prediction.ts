@@ -92,6 +92,25 @@ export function inferCategory(text: string): TaskCategory {
   return 'Operations';
 }
 
+/** Cold-start duration benchmark for a category/priority pair. */
+export function durationBenchmark(
+  priority: Priority = 'Medium',
+  category: TaskCategory = 'Operations',
+): { medianDays: number; p85Days: number } {
+  const priorityBench = BENCHMARK_MAP[priority] ?? BENCHMARK_MAP['Medium'];
+  const categoryBench = BENCHMARK_MAP[category] ?? { median: 9, p85: 15 };
+  return {
+    medianDays: Math.max(
+      1,
+      Math.round((priorityBench.median * 0.55 + categoryBench.median * 0.45) * 10) / 10,
+    ),
+    p85Days: Math.max(
+      2,
+      Math.ceil(priorityBench.p85 * 0.55 + categoryBench.p85 * 0.45),
+    ),
+  };
+}
+
 export function inferActionVerb(text: string): string {
   const firstWord = text.trim().split(/\s+/)[0] || '';
   const capitalized = firstWord.charAt(0).toUpperCase() + firstWord.slice(1).toLowerCase();

@@ -55,6 +55,8 @@ export function useTasks(teamId?: string | null) {
       assigneeEmail?: string | null,
       priority?: Priority | null,
       category?: TaskCategory | null,
+      scheduledStartAt?: string | null,
+      reminderAt?: string | null,
     ): Promise<boolean> => {
       try {
         const task = await api.createTask(
@@ -64,6 +66,8 @@ export function useTasks(teamId?: string | null) {
           assigneeEmail,
           priority,
           category,
+          scheduledStartAt,
+          reminderAt,
         );
         setTasks((current) => [task, ...current]);
         setError(null);
@@ -265,6 +269,12 @@ export function useTasks(teamId?: string | null) {
     [refresh, teamId],
   );
 
+  const replaceTask = useCallback((task: Task) => {
+    setTasks((current) =>
+      current.map((item) => (item.id === task.id ? task : item)),
+    );
+  }, []);
+
   const dismissError = useCallback(() => setError(null), []);
 
   return {
@@ -272,6 +282,7 @@ export function useTasks(teamId?: string | null) {
     loading,
     error,
     refresh,
+    replaceTask,
     addTask,
     toggleTask,
     editTask,
