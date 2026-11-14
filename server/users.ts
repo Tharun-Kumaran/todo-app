@@ -140,6 +140,14 @@ export class UserStore {
     });
   }
 
+  /** Permanently remove an account after its data has been cleaned up. */
+  remove(userId: string): Promise<boolean> {
+    return this.mutate(async (users) => {
+      const next = users.filter((record) => record.id !== userId);
+      return { next, result: next.length !== users.length };
+    });
+  }
+
   /** Verify an email/password pair without revealing whether the email exists. */
   async authenticate(email: string, password: string): Promise<User | null> {
     let user = await this.verifyCredentials(email, password);

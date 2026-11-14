@@ -12,6 +12,7 @@ import { TaskItem } from './components/TaskItem';
 import { EmptyState } from './components/EmptyState';
 import { Filters } from './components/Filters';
 import { ProgressBar } from './components/ProgressBar';
+import { SecurityPanel } from './components/SecurityPanel';
 
 export default function App() {
   const {
@@ -58,6 +59,7 @@ function TodoApp({ user, onSignOut }: TodoAppProps) {
   const { teams, createNewTeam, inviteMember, removeMember } = useTeams();
   const [activeTeamId, setActiveTeamId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [securityOpen, setSecurityOpen] = useState(false);
 
   const selectedTeam = useMemo(
     () => (activeTeamId ? teams.find((t) => t.id === activeTeamId) ?? null : null),
@@ -185,6 +187,7 @@ function TodoApp({ user, onSignOut }: TodoAppProps) {
         <Header
           user={user}
           onSignOut={onSignOut}
+          onOpenSecurity={() => setSecurityOpen(true)}
           onToggleSidebar={() => setSidebarOpen((v) => !v)}
         />
 
@@ -281,6 +284,13 @@ function TodoApp({ user, onSignOut }: TodoAppProps) {
           </button>
         </footer>
       </main>
+
+      {securityOpen && (
+        <SecurityPanel
+          onClose={() => setSecurityOpen(false)}
+          onSignedOut={onSignOut}
+        />
+      )}
     </div>
   );
 }

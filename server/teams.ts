@@ -134,6 +134,43 @@ export class TeamStore {
     });
   }
 
+  /** Teams owned by this user; account deletion is blocked while any exist. */
+  ownedBy(userId: string, userEmail: string): Team[] {
+    const normalized = userEmail.toLowerCase();
+    return this.teams
+      .filter(
+        (team) =>
+          team.ownerId === userId ||
+          team.ownerEmail.toLowerCase() === normalized,
+      )
+      .map(cloneTeam);
+  }
+
+  /** Remove a user's membership from teams they do not own. */
+  removeUser(userId: string, userEmail: string): Promise<number> {
+    const normalized = userEmail.toLowerCase();
+    return this.mutate((teams) => {
+      let removed = 0;
+      const next = teams.map((team) => {
+        if (
+          team.ownerId === userId ||
+          team.ownerEmail.toLowerCase() === normalized
+        ) {
+          return team;
+        }
+        const members = team.members.filter(
+          (member) =>
+            member.userId !== userId &&
+            member.email.toLowerCase() !== normalized,
+        );
+        if (members.length === team.members.length) return team;
+        removed += 1;
+        return { ...team, members };
+      });
+      return { next, result: removed };
+    });
+  }
+
   addMember(
     teamId: string,
     requesterId: string,

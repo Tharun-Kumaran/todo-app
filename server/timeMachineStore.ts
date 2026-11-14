@@ -490,6 +490,54 @@ export class TimeMachineStore {
       .map(clone);
   }
 
+  /** Everything this user owns, for the account data export endpoint. */
+  exportForUser(userId: string): {
+    predictions: PredictionRecord[];
+    recommendations: RecommendationRecord[];
+    events: RecommendationEvent[];
+    outcomes: OutcomeRecord[];
+    modelState: ModelState | null;
+    reminders: ReminderRecord[];
+    series: RecurringSeries[];
+  } {
+    return {
+      predictions: this.listPredictions(userId),
+      recommendations: this.data.recommendations
+        .filter((record) => record.userId === userId)
+        .map(clone),
+      events: this.listEvents(userId),
+      outcomes: this.listOutcomes(userId),
+      modelState: this.getModelState(userId),
+      reminders: this.listReminders(userId),
+      series: this.listSeries(userId),
+    };
+  }
+
+  /** Remove all Time Machine data for an account being deleted. */
+  async deleteForUser(userId: string): Promise<void> {
+    await this.mutate((data) => ({
+      next: {
+        ...data,
+        predictions: data.predictions.filter(
+          (record) => record.userId !== userId,
+        ),
+        recommendations: data.recommendations.filter(
+          (record) => record.userId !== userId,
+        ),
+        events: data.events.filter((record) => record.userId !== userId),
+        outcomes: data.outcomes.filter((record) => record.userId !== userId),
+        modelStates: data.modelStates.filter(
+          (record) => record.userId !== userId,
+        ),
+        reminders: data.reminders.filter(
+          (record) => record.userId !== userId,
+        ),
+        series: data.series.filter((record) => record.userId !== userId),
+      },
+      result: undefined,
+    }));
+  }
+
   private mutate<T>(
     fn: (data: TimeMachineFile) => { next: TimeMachineFile; result: T },
   ): Promise<T> {

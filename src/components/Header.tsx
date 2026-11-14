@@ -7,6 +7,7 @@ type Theme = 'light' | 'dark';
 interface Props {
   user?: User;
   onSignOut?: () => void;
+  onOpenSecurity?: () => void;
   onToggleSidebar?: () => void;
 }
 
@@ -14,7 +15,12 @@ function initialTheme(): Theme {
   return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
 }
 
-export function Header({ user, onSignOut, onToggleSidebar }: Props) {
+export function Header({
+  user,
+  onSignOut,
+  onOpenSecurity,
+  onToggleSidebar,
+}: Props) {
   const [theme, setTheme] = useState<Theme>(initialTheme);
 
   const today = new Date().toLocaleDateString(undefined, {
@@ -70,6 +76,15 @@ export function Header({ user, onSignOut, onToggleSidebar }: Props) {
             <span className="account-email" title={user.email}>
               {user.email}
             </span>
+            {onOpenSecurity && (
+              <button
+                className="signout"
+                type="button"
+                onClick={onOpenSecurity}
+              >
+                Security
+              </button>
+            )}
             <button className="signout" type="button" onClick={onSignOut}>
               Sign out
             </button>

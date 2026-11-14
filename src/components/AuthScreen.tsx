@@ -7,7 +7,11 @@ type Mode = 'login' | 'register';
 interface Props {
   initialError: string | null;
   onSignIn: (email: string, password: string) => Promise<User>;
-  onSignUp: (email: string, password: string) => Promise<User>;
+  onSignUp: (
+    email: string,
+    password: string,
+    inviteCode?: string,
+  ) => Promise<User>;
 }
 
 export function AuthScreen({ initialError, onSignIn, onSignUp }: Props) {
@@ -15,6 +19,7 @@ export function AuthScreen({ initialError, onSignIn, onSignUp }: Props) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
+  const [inviteCode, setInviteCode] = useState('');
   const [reveal, setReveal] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -38,7 +43,7 @@ export function AuthScreen({ initialError, onSignIn, onSignUp }: Props) {
     setBusy(true);
     try {
       if (isRegister) {
-        await onSignUp(email.trim(), password);
+        await onSignUp(email.trim(), password, inviteCode.trim() || undefined);
       } else {
         await onSignIn(email.trim(), password);
       }
@@ -54,6 +59,7 @@ export function AuthScreen({ initialError, onSignIn, onSignUp }: Props) {
     setError(null);
     setPassword('');
     setConfirm('');
+    setInviteCode('');
   }
 
   return (
@@ -129,6 +135,23 @@ export function AuthScreen({ initialError, onSignIn, onSignUp }: Props) {
                 placeholder="Repeat your password"
                 onChange={(event) => setConfirm(event.target.value)}
               />
+            </label>
+          )}
+
+          {isRegister && (
+            <label className="auth-field">
+              <span>Invite code (private beta)</span>
+              <input
+                type="text"
+                name="invite-code"
+                autoComplete="off"
+                value={inviteCode}
+                placeholder="Paste your invite code"
+                onChange={(event) => setInviteCode(event.target.value)}
+              />
+              <small className="auth-hint">
+                Required while the beta is invite-only.
+              </small>
             </label>
           )}
 

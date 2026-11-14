@@ -4,6 +4,7 @@ import type {
   Priority,
   RecommendationApplyResponse,
   RecurringSeries,
+  SessionInfo,
   Task,
   TaskCategory,
   Team,
@@ -52,6 +53,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     if (
       response.status === 401 &&
       !path.startsWith('/api/auth/') &&
+      path !== '/api/account' &&
       typeof window !== 'undefined'
     ) {
       window.dispatchEvent(new Event('todo:unauthorized'));
@@ -94,10 +96,14 @@ export function fetchMe(): Promise<User | null> {
     });
 }
 
-export function register(email: string, password: string): Promise<User> {
+export function register(
+  email: string,
+  password: string,
+  inviteCode?: string,
+): Promise<User> {
   return request<{ user: User }>('/api/auth/register', {
     method: 'POST',
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email, password, inviteCode }),
   }).then((data) => data.user);
 }
 
@@ -110,6 +116,35 @@ export function login(email: string, password: string): Promise<User> {
 
 export function logout(): Promise<void> {
   return request<void>('/api/auth/logout', { method: 'POST' });
+}
+
+export function fetchSessions(): Promise<SessionInfo[]> {
+  return request<{ sessions: SessionInfo[] }>('/api/auth/sessions').then(
+    (data) => data.sessions,
+  );
+}
+
+export function revokeSession(id: string): Promise<void> {
+  return request<void>(`/api/auth/sessions/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
+}
+
+export function revokeOtherSessions(): Promise<number> {
+  return request<{ revoked: number }>('/api/auth/sessions/revoke-others', {
+    method: 'POST',
+  }).then((data) => data.revoked);
+}
+
+export function exportAccount(): Promise<unknown> {
+  return request<unknown>('/api/account/export');
+}
+
+export function deleteAccount(password: string): Promise<void> {
+  return request<void>('/api/account', {
+    method: 'DELETE',
+    body: JSON.stringify({ password }),
+  });
 }
 
 // --- Teams ----------------------------------------------------------------

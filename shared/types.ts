@@ -24,6 +24,15 @@ export interface User {
   createdAt: string;
 }
 
+export interface SessionInfo {
+  id: string;
+  createdAt: string;
+  lastSeenAt: string;
+  expiresAt: string;
+  userAgent: string | null;
+  current: boolean;
+}
+
 export interface TeamMember {
   userId?: string | null;
   email: string;

@@ -46,12 +46,15 @@ export function useAuth() {
     return next;
   }, []);
 
-  const signUp = useCallback(async (email: string, password: string) => {
-    const next = await api.register(email, password);
-    setUser(next);
-    setError(null);
-    return next;
-  }, []);
+  const signUp = useCallback(
+    async (email: string, password: string, inviteCode?: string) => {
+      const next = await api.register(email, password, inviteCode);
+      setUser(next);
+      setError(null);
+      return next;
+    },
+    [],
+  );
 
   const signOut = useCallback(async () => {
     try {

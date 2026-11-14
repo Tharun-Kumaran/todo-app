@@ -4,6 +4,7 @@ import express, {
   type RequestHandler,
   type Response,
 } from 'express';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +12,8 @@ import type { Priority, TaskCategory, User } from '../shared/types';
 import { TaskStore, type TaskPatch } from './store';
 import { UserStore, normalizeEmail, passwordProblem } from './users';
 import { TeamStore } from './teams';
+import { InviteStore } from './invites';
+import { RateLimiter } from './rateLimit';
 import { predictTaskFeasibility } from './prediction';
 import { TimeMachineStore } from './timeMachineStore';
 import {
@@ -53,8 +56,17 @@ const teamsFile = process.env.TODO_TEAMS_FILE
 const timeMachineFile = process.env.TODO_TIME_MACHINE_FILE
   ? path.resolve(process.env.TODO_TIME_MACHINE_FILE)
   : path.join(dataDir, 'time-machine.json');
+const invitesFile = process.env.TODO_INVITES_FILE
+  ? path.resolve(process.env.TODO_INVITES_FILE)
+  : path.join(dataDir, 'invites.json');
 
 const port = Number(process.env.PORT) || 3001;
+const inviteOnly =
+  process.env.TODO_INVITE_ONLY === '1' ||
+  process.env.TODO_INVITE_ONLY?.toLowerCase() === 'true';
+const rateLimitDisabled =
+  process.env.TODO_RATE_LIMIT_DISABLED === '1' ||
+  process.env.TODO_RATE_LIMIT_DISABLED?.toLowerCase() === 'true';
 const maxTextLength = 500;
 const maxMilestoneLength = 1000;
 const sessionTtlMs = sessionDays(process.env.TODO_SESSION_DAYS) * 86_400_000;
@@ -69,6 +81,8 @@ const users = new UserStore(usersFile);
 const sessions = new SessionStore(sessionsFile, sessionTtlMs);
 const teams = new TeamStore(teamsFile);
 const timeMachineStore = new TimeMachineStore(timeMachineFile);
+const invites = new InviteStore(invitesFile);
+const rateLimiter = new RateLimiter();
 const timeMachineDeps = { tasks: store, timeMachine: timeMachineStore };
 await Promise.all([
   store.init(),
@@ -76,12 +90,58 @@ await Promise.all([
   sessions.init(),
   teams.init(),
   timeMachineStore.init(),
+  invites.init(),
 ]);
 
 const app = express();
 app.disable('x-powered-by');
 // Needed for req.secure / X-Forwarded-Proto when deployed behind a proxy.
 app.set('trust proxy', 1);
+
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader(
+    'Permissions-Policy',
+    'camera=(), microphone=(), geolocation=()',
+  );
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  if (process.env.NODE_ENV === 'production') {
+    res.setHeader(
+      'Strict-Transport-Security',
+      'max-age=31536000; includeSubDomains',
+    );
+  }
+  next();
+});
+
+/**
+ * Reject cross-site browser writes unless the Origin is this host or the one
+ * explicitly configured for a split frontend/API deployment. Requests without
+ * an Origin header (CLI, tests, same-origin navigations) are allowed.
+ */
+app.use((req, res, next) => {
+  if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+    next();
+    return;
+  }
+  const origin = req.headers.origin;
+  if (!origin) {
+    next();
+    return;
+  }
+  const host =
+    req.get('x-forwarded-host')?.split(',')[0]?.trim() || req.get('host');
+  const sameOrigin =
+    host !== undefined &&
+    (origin === `http://${host}` || origin === `https://${host}`);
+  if (sameOrigin || (corsOrigin !== null && origin === corsOrigin)) {
+    next();
+    return;
+  }
+  res.status(403).json({ error: 'Cross-origin request blocked.' });
+});
 
 if (corsOrigin) {
   app.use((req, res, next) => {
@@ -208,6 +268,8 @@ const requireUser: RequestHandler = (req, res, next) => {
   }
 
   res.locals.user = user;
+  res.locals.sessionToken = token;
+  if (token) void sessions.touch(token);
   next();
 };
 
@@ -232,11 +294,65 @@ function routeParam(req: Request, name: string): string {
   return Array.isArray(value) ? (value[0] ?? '') : value;
 }
 
+function clientIp(req: Request): string {
+  return req.ip || req.socket.remoteAddress || 'unknown';
+}
+
+function requestIpHash(req: Request): string {
+  return createHash('sha256').update(clientIp(req)).digest('hex').slice(0, 16);
+}
+
+function requestMetadata(req: Request): {
+  userAgent: string | null;
+  ipHash: string;
+} {
+  return {
+    userAgent: req.get('user-agent')?.slice(0, 300) ?? null,
+    ipHash: requestIpHash(req),
+  };
+}
+
+function currentSessionToken(res: Response): string | null {
+  const token = res.locals.sessionToken;
+  return typeof token === 'string' ? token : null;
+}
+
+function rateLimit(
+  _req: Request,
+  res: Response,
+  checks: Array<{ key: string; limit: number; windowMs: number }>,
+): boolean {
+  if (rateLimitDisabled) return true;
+  let retryAfterMs = 0;
+  for (const check of checks) {
+    const result = rateLimiter.consume(
+      check.key,
+      check.limit,
+      check.windowMs,
+    );
+    if (!result.allowed) {
+      retryAfterMs = Math.max(retryAfterMs, result.retryAfterMs);
+    }
+  }
+  if (retryAfterMs <= 0) return true;
+  const seconds = Math.max(1, Math.ceil(retryAfterMs / 1000));
+  res.setHeader('Retry-After', String(seconds));
+  res.status(429).json({
+    error: `Too many attempts. Try again in ${seconds} second${seconds === 1 ? '' : 's'}.`,
+    code: 'RATE_LIMITED',
+  });
+  return false;
+}
+
 // --- Authentication -------------------------------------------------------
 
 app.post('/api/auth/register', async (req, res, next) => {
   try {
-    const body = (req.body ?? {}) as { email?: unknown; password?: unknown };
+    const body = (req.body ?? {}) as {
+      email?: unknown;
+      password?: unknown;
+      inviteCode?: unknown;
+    };
     const email = normalizeEmail(body.email);
     if (!email) {
       res.status(400).json({ error: 'Enter a valid email address.' });
@@ -250,9 +366,62 @@ app.post('/api/auth/register', async (req, res, next) => {
       return;
     }
 
+    const ip = clientIp(req);
+    if (
+      !rateLimit(req, res, [
+        {
+          key: `register:ip:${ip}`,
+          limit: 100,
+          windowMs: 60 * 60_000,
+        },
+        {
+          key: `register:email:${email}`,
+          limit: 10,
+          windowMs: 60 * 60_000,
+        },
+      ])
+    ) {
+      return;
+    }
+
+    if (users.findByEmail(email)) {
+      res
+        .status(409)
+        .json({ error: 'An account with this email already exists.' });
+      return;
+    }
+
+    const inviteCode =
+      typeof body.inviteCode === 'string' ? body.inviteCode.trim() : '';
+    let consumedInvite = false;
+    if (inviteOnly) {
+      if (!inviteCode) {
+        res.status(403).json({
+          error: 'This beta is invite-only. Enter your invite code.',
+          code: 'INVITE_REQUIRED',
+        });
+        return;
+      }
+      const consumed = await invites.consume(inviteCode, email);
+      if (!consumed.ok) {
+        const message =
+          consumed.reason === 'expired'
+            ? 'This invite code has expired.'
+            : consumed.reason === 'email_mismatch'
+              ? 'This invite code was issued for a different email address.'
+              : consumed.reason === 'exhausted'
+                ? 'This invite code has already been used.'
+                : 'That invite code is not valid.';
+        res.status(403).json({ error: message, code: 'INVITE_INVALID' });
+        return;
+      }
+      consumedInvite = true;
+    }
+
     const isFirstUser = users.count() === 0;
     const user = await users.create(email, password);
     if (!user) {
+      if (consumedInvite) await invites.release(inviteCode);
       res
         .status(409)
         .json({ error: 'An account with this email already exists.' });
@@ -265,7 +434,11 @@ app.post('/api/auth/register', async (req, res, next) => {
     // Link account to any existing team invitations
     await teams.linkUser(user.id, user.email);
 
-    sendSession(req, res, await sessions.create(user.id));
+    sendSession(
+      req,
+      res,
+      await sessions.create(user.id, requestMetadata(req)),
+    );
     res.status(201).json({ user });
   } catch (error) {
     next(error);
@@ -282,6 +455,23 @@ app.post('/api/auth/login', async (req, res, next) => {
       return;
     }
 
+    if (
+      !rateLimit(req, res, [
+        {
+          key: `login:ip:${clientIp(req)}`,
+          limit: 200,
+          windowMs: 15 * 60_000,
+        },
+        {
+          key: `login:email:${email}`,
+          limit: 30,
+          windowMs: 15 * 60_000,
+        },
+      ])
+    ) {
+      return;
+    }
+
     const user = await users.authenticate(email, password);
     if (!user) {
       res.status(401).json({ error: 'Invalid email or password.' });
@@ -289,7 +479,11 @@ app.post('/api/auth/login', async (req, res, next) => {
     }
 
     await teams.linkUser(user.id, user.email);
-    sendSession(req, res, await sessions.create(user.id));
+    sendSession(
+      req,
+      res,
+      await sessions.create(user.id, requestMetadata(req)),
+    );
     res.json({ user });
   } catch (error) {
     next(error);
@@ -304,6 +498,108 @@ app.post('/api/auth/logout', async (req, res, next) => {
   try {
     const token = readCookie(req.headers.cookie, SESSION_COOKIE);
     if (token) await sessions.destroy(token);
+    res.setHeader('Set-Cookie', clearSessionCookie(cookieOptions(req)));
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/auth/sessions', requireUser, (_req, res) => {
+  res.json({
+    sessions: sessions.listForUser(
+      currentUserId(res),
+      currentSessionToken(res),
+    ),
+  });
+});
+
+app.delete('/api/auth/sessions/:id', requireUser, async (req, res, next) => {
+  try {
+    const revoked = await sessions.revoke(
+      currentUserId(res),
+      routeParam(req, 'id'),
+    );
+    if (!revoked) {
+      res.status(404).json({ error: 'Session not found.' });
+      return;
+    }
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post(
+  '/api/auth/sessions/revoke-others',
+  requireUser,
+  async (_req, res, next) => {
+    try {
+      const token = currentSessionToken(res);
+      if (!token) {
+        res.status(401).json({ error: 'Sign in required.' });
+        return;
+      }
+      const revoked = await sessions.revokeOthers(currentUserId(res), token);
+      res.json({ revoked });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+app.get('/api/account/export', requireUser, (_req, res) => {
+  const userId = currentUserId(res);
+  const userEmail = currentUserEmail(res);
+  const userTeams = teams.listForUser(userId, userEmail);
+  const teamTasks = userTeams.flatMap((team) => store.listFor(userId, team.id));
+  res.setHeader(
+    'Content-Disposition',
+    `attachment; filename="todo-export-${userId}.json"`,
+  );
+  res.json({
+    exportedAt: new Date().toISOString(),
+    user: currentUser(res),
+    tasks: [...store.listFor(userId, null), ...teamTasks],
+    teams: userTeams,
+    timeMachine: timeMachineStore.exportForUser(userId),
+  });
+});
+
+app.delete('/api/account', requireUser, async (req, res, next) => {
+  try {
+    const body = (req.body ?? {}) as { password?: unknown };
+    const password = typeof body.password === 'string' ? body.password : '';
+    if (!password) {
+      res.status(400).json({ error: 'Enter your password to delete your account.' });
+      return;
+    }
+
+    const userId = currentUserId(res);
+    const userEmail = currentUserEmail(res);
+    const verified = await users.authenticate(userEmail, password);
+    if (!verified) {
+      res.status(401).json({ error: 'Password is incorrect.' });
+      return;
+    }
+
+    const ownedTeams = teams.ownedBy(userId, userEmail);
+    if (ownedTeams.length > 0) {
+      res.status(409).json({
+        error:
+          'Delete or transfer the teams you own before deleting your account.',
+        code: 'OWNS_TEAMS',
+        teams: ownedTeams.map((team) => ({ id: team.id, name: team.name })),
+      });
+      return;
+    }
+
+    await teams.removeUser(userId, userEmail);
+    await store.removePersonalForUser(userId);
+    await timeMachineStore.deleteForUser(userId);
+    await sessions.destroyAllForUser(userId);
+    await users.remove(userId);
+
     res.setHeader('Set-Cookie', clearSessionCookie(cookieOptions(req)));
     res.status(204).end();
   } catch (error) {
@@ -1116,7 +1412,10 @@ app.use(errorHandler);
 const server = app.listen(port, () => {
   console.log(`API listening on http://localhost:${port}`);
   console.log(
-    `Data files: ${dataFile}, ${usersFile}, ${sessionsFile}, ${teamsFile}, ${timeMachineFile}`,
+    `Data files: ${dataFile}, ${usersFile}, ${sessionsFile}, ${teamsFile}, ${timeMachineFile}, ${invitesFile}`,
+  );
+  console.log(
+    `Registration: ${inviteOnly ? 'invite-only' : 'open'}; rate limiting: ${rateLimitDisabled ? 'disabled' : 'enabled'}`,
   );
   if (existsSync(distDir)) {
     console.log(`Serving built UI from ${distDir}`);

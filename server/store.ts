@@ -85,6 +85,16 @@ export class TaskStore {
       .map(toTask);
   }
 
+  /** Remove a user's personal tasks when they delete their account. */
+  removePersonalForUser(userId: string): Promise<number> {
+    return this.mutate((tasks) => {
+      const next = tasks.filter(
+        (task) => !(task.userId === userId && !task.teamId),
+      );
+      return { next, result: tasks.length - next.length };
+    });
+  }
+
   countFor(userId: string, teamId?: string | null): number {
     if (teamId) {
       return this.tasks.filter((task) => task.teamId === teamId).length;
