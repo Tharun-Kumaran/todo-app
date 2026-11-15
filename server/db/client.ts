@@ -122,6 +122,7 @@ class PostgresDb implements Db {
       connectionString,
       max: Number(process.env.DATABASE_POOL_MAX) || 15,
       statement_timeout: 5_000,
+      connectionTimeoutMillis: 10_000,
       ssl: configuredSsl(),
     });
   }
