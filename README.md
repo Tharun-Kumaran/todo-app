@@ -39,6 +39,7 @@ same-origin URLs in development.
 | `npm test`          | Runs the suites against an already-running API     |
 | `npm run test:db`   | Starts a throwaway PGlite API, runs the suites, cleans up |
 | `npm run migrate:json` | Imports legacy JSON data (`--dry-run` / `--apply` / `--verify`) |
+| `npm run db:check`  | Connects with the configured driver and prints the server version |
 | `npm start`         | Runs the API and serves the built UI on `:3001`   |
 | `npm run preview`   | Serves the Vite build locally                     |
 | `npm run invite:create` | Creates an invite code (see below)            |
@@ -357,6 +358,17 @@ are written to the log and `email_outbox`, but no mail is delivered.
 
 Works with Fly.io, Railway, a VPS, or any container platform. Use Neon,
 Supabase, or the host's Postgres for the database.
+
+Check the connection string from your machine first:
+
+```sh
+DB_DRIVER=postgres \
+DATABASE_URL='postgres://user:pass@host:5432/todo' \
+DATABASE_SSL=require \
+npm run db:check
+```
+
+Then build and run the image:
 
 ```sh
 docker build -t todo-app .
