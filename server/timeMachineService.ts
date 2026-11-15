@@ -786,7 +786,7 @@ export async function applyRecommendation(params: {
     },
   });
 
-  const history = deps.tasks.listFor(userId, null);
+  const history = await deps.tasks.listFor(userId, null);
   const timeMachine = await getTimeMachineForTask({
     deps,
     userId,

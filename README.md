@@ -1,15 +1,16 @@
 # To-Do
 
 A to-do app built with **React + Vite + TypeScript**, backed by an **Express**
-API that persists tasks to a local JSON file. Each email/password account has
-its own private task list.
+API that stores accounts, sessions, teams, and tasks in **Postgres** (an
+embedded PGlite database locally). Each email/password account has its own
+private task list.
 
 ## Stack
 
 - React 19 + TypeScript
 - Vite (dev server, HMR, production build)
 - Express 5 API
-- Atomic JSON file storage for tasks, accounts, and sessions (`server/data/`)
+- Postgres via `pg` in production, embedded PGlite for local development
 
 ## Getting started
 
@@ -35,6 +36,9 @@ same-origin URLs in development.
 | `npm run dev:web`   | Runs only Vite                                    |
 | `npm run typecheck` | Type-checks the frontend and server (`tsc`)       |
 | `npm run build`     | Type-checks, then builds the frontend into `dist` |
+| `npm test`          | Runs the suites against an already-running API     |
+| `npm run test:db`   | Starts a throwaway PGlite API, runs the suites, cleans up |
+| `npm run migrate:json` | Imports legacy JSON data (`--dry-run` / `--apply` / `--verify`) |
 | `npm start`         | Runs the API and serves the built UI on `:3001`   |
 | `npm run preview`   | Serves the Vite build locally                     |
 | `npm run invite:create` | Creates an invite code (see below)            |
@@ -51,38 +55,41 @@ npm start
 
 ## Data
 
-Runtime data lives in `server/data/` and is git-ignored because it is personal:
+Accounts, sessions, teams, tasks, task events, and outcomes live in Postgres.
+Local development uses an embedded [PGlite](https://pglite.dev/) database at
+`server/data/pglite/` (git-ignored). Set `DB_DRIVER=postgres` and
+`DATABASE_URL` to use a Postgres server instead.
 
-| File            | Contents                                                 |
-| --------------- | -------------------------------------------------------- |
-| `tasks.json`    | Tasks, each mapped to a `userId` and optional `teamId`   |
-| `users.json`    | Accounts: id, email, salt, and scrypt password hash      |
-| `sessions.json` | Active sessions as SHA-256 token hashes with expiry      |
-| `teams.json`    | Teams: id, name, owner, and members list                 |
-| `time-machine.json` | Predictions, recommendations, outcomes, reminders, and series |
-| `invites.json`  | Invite-code hashes for the private beta                  |
+| Table               | Contents                                              |
+| ------------------- | ----------------------------------------------------- |
+| `users`, `user_settings` | Accounts (scrypt PHC hashes) and per-user preferences |
+| `sessions`          | Session token hashes with expiry                      |
+| `teams`, `team_members` | Teams, owners, and invited members                |
+| `tasks`, `task_milestones` | Tasks with deadlines, progress, and milestone comments |
+| `task_events`       | Append-only audit trail used by Time Machine          |
+| `task_outcomes`     | Completion outcomes used to calibrate predictions     |
+| `schema_migrations` | Applied migration ids                                 |
 
-Writes go through a temp file and an atomic rename, and mutations are
-serialized to avoid lost updates.
+Two stores stay in JSON because they hold model/operator state rather than user
+records: `time-machine.json` (recommendations, outcomes, reminders, series) and
+`invites.json` (hashed invite codes). Writes go through a temp file and an
+atomic rename, and mutations are serialized to avoid lost updates.
 
 Each task stores `userId`, `creatorEmail`, `teamId`, `assigneeEmail`, `dueAt`,
-`progress`, `completedAt`, and a `milestones` array. `completedAt` is stamped
-when a task becomes complete and cleared when it is reopened. Files written by
-older versions are migrated on load: deadlines and completion timestamps
-default to `null` (with completed tasks using `updatedAt` as their completion
-time), completed tasks to 100%, everything else to 0%, and the milestone list
-to empty. Tasks created before accounts existed have no `userId`; the first
-account to register claims them.
+`progress`, `completedAt`, `version`, and its milestones. `completedAt` is
+stamped when a task becomes complete and cleared when it is reopened. Tasks
+created before accounts existed have no `userId`; the first account to register
+claims them. Schema changes are applied automatically at server start.
 
 Overrides:
 
 | Variable              | Default                     | Purpose                              |
 | --------------------- | --------------------------- | ------------------------------------ |
 | `PORT`                | `3001`                      | API/UI port in production            |
-| `TODO_DATA_FILE`      | `server/data/tasks.json`    | Location of the task store           |
-| `TODO_USERS_FILE`     | `server/data/users.json`    | Location of the account store        |
-| `TODO_SESSIONS_FILE`  | `server/data/sessions.json` | Location of the session store        |
-| `TODO_TEAMS_FILE`     | `server/data/teams.json`    | Location of the teams store          |
+| `DB_DRIVER`           | `pglite`                    | `pglite` (embedded) or `postgres`    |
+| `PGLITE_DATA_DIR`     | `server/data/pglite`        | PGlite data directory                |
+| `DATABASE_URL`        | unset                       | Postgres connection string           |
+| `DATABASE_POOL_MAX`   | `15`                        | Postgres pool size                   |
 | `TODO_TIME_MACHINE_FILE` | `server/data/time-machine.json` | Time Machine records and model state |
 | `TODO_INVITES_FILE`   | `server/data/invites.json`  | Invite-code store                    |
 | `TODO_INVITE_ONLY`    | unset                       | Set to `1` to require an invite code |
@@ -92,6 +99,30 @@ Overrides:
 | `TODO_COOKIE_SECURE`  | auto over HTTPS             | Force the `Secure` cookie flag       |
 | `TODO_CORS_ORIGIN`    | unset                       | Allow one browser origin with cookies|
 | `VITE_API_BASE_URL`   | same-origin `/api`          | API URL for a remote setup           |
+
+`TODO_DATA_FILE`, `TODO_USERS_FILE`, and `TODO_TEAMS_FILE` now only tell the
+JSON importer where the legacy files are.
+
+## Migrating from the JSON stores
+
+Older versions stored tasks, accounts, and teams in
+`server/data/{tasks,users,teams}.json`. Import them into the database:
+
+```sh
+npm run migrate:json -- --dry-run   # report what would be imported (default)
+npm run migrate:json -- --apply     # write everything in one transaction
+npm run migrate:json -- --verify    # confirm every JSON record is in the database
+```
+
+- The import is idempotent; existing rows are skipped, so re-running is safe.
+- Records whose ids are not UUIDs are reported and skipped, while valid records
+  still import. A summary prints counts plus up to 50 warnings.
+- Legacy scrypt password hashes are converted to PHC format, so users keep their
+  passwords. Sessions are not imported — users sign in again.
+- Backfill synthesizes `task.created`, `task.milestone_added`, and
+  `task.completed` events, plus deadline outcomes for completed tasks.
+- Back up `server/data/` before running `--apply`.
+
 
 ## Workspaces: Personal vs Team
 
@@ -204,22 +235,29 @@ Unauthenticated requests get `401`.
 
 ## Testing
 
-Run the integration and end-to-end test suite:
-
 ```bash
-# Start the API first, then:
+# Self-contained: starts the API on a temporary PGlite database, runs every
+# suite, then stops the server and deletes the temporary data.
+npm run test:db
+
+# Or against an API you already have running:
 npm test
 
 # Against a non-default API:
 API_BASE=http://localhost:3011 npm test
 ```
 
+`npm test` covers the task API, teams, prediction engine, Time Machine,
+auth hardening, database foundation, and the JSON importer.
+`tests/db-foundation.test.mjs` and `tests/migration.test.mjs` create their own
+temporary databases and do not touch your local data.
+
 ## Deploying the frontend
 
 `.github/workflows/deploy-pages.yml` builds the frontend and publishes `dist`
 to GitHub Pages on every push to `main`.
 
-GitHub Pages only serves static files, so the local JSON API is **not**
+GitHub Pages only serves static files, so the local API is **not**
 available there. The deployed page will show a connection error until you host
 the Express server elsewhere and set `VITE_API_BASE_URL` to its URL at build
 time. For a cross-origin API, also set `TODO_CORS_ORIGIN` to the Pages origin;

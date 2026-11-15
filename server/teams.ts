@@ -1,272 +1,113 @@
 import { randomUUID } from 'node:crypto';
-import { promises as fs } from 'node:fs';
-import path from 'node:path';
-import type { Team, TeamMember } from '../shared/types';
-import { normalizeEmail } from './users';
+import type { Team } from '../shared/types';
+import { getDb } from './db/client.ts';
+import {
+  addTeamMember,
+  createTeam,
+  getTeamForUser,
+  getUserTeamIds,
+  isTeamMember,
+  linkUserToTeams,
+  listTeamsForUser,
+  ownedTeams,
+  removeTeamMember,
+  removeUserFromTeams,
+} from './repositories/teams.ts';
 
-interface TeamFile {
-  version: 1;
-  teams: Team[];
-}
-
-function cloneTeam(team: Team): Team {
-  return {
-    ...team,
-    members: team.members.map((m) => ({ ...m })),
-  };
-}
-
+/**
+ * Team membership lives in Postgres/PGlite. Every read is scoped to a user id
+ * or verified team membership, so one account cannot see another team.
+ */
 export class TeamStore {
-  private teams: Team[] = [];
-  private opChain: Promise<unknown> = Promise.resolve();
-  private readonly file: string;
-
-  constructor(file: string) {
-    this.file = file;
-  }
+  /** Kept for constructor compatibility; the database is the store now. */
+  constructor(_file?: string) {}
 
   async init(): Promise<void> {
-    try {
-      const raw = await fs.readFile(this.file, 'utf8');
-      const parsed = JSON.parse(raw) as Partial<TeamFile>;
-      this.teams = Array.isArray(parsed.teams) ? parsed.teams.map(cloneTeam) : [];
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT') {
-        console.error(`Could not read ${this.file}; starting with no teams.`, error);
-        try {
-          await fs.rename(this.file, `${this.file}.corrupt-${Date.now()}`);
-        } catch {
-          // Ignore rename error
-        }
-      }
-      this.teams = [];
-      await this.persist([]);
-    }
+    // The database is opened and migrated by the server bootstrap.
   }
 
-  listForUser(userId: string, userEmail: string): Team[] {
-    const normalized = userEmail.toLowerCase();
-    return this.teams
-      .filter((t) => this.isMemberDirect(t, userId, normalized))
-      .map(cloneTeam);
+  async listForUser(userId: string, userEmail: string): Promise<Team[]> {
+    return listTeamsForUser(await getDb(), userId, userEmail);
   }
 
-  getUserTeamIds(userId: string, userEmail: string): string[] {
-    const normalized = userEmail.toLowerCase();
-    return this.teams
-      .filter((t) => this.isMemberDirect(t, userId, normalized))
-      .map((t) => t.id);
+  async getUserTeamIds(
+    userId: string,
+    userEmail: string,
+  ): Promise<string[]> {
+    return getUserTeamIds(await getDb(), userId, userEmail);
   }
 
-  get(teamId: string, userId: string, userEmail: string): Team | null {
-    const normalized = userEmail.toLowerCase();
-    const team = this.teams.find((t) => t.id === teamId);
-    if (!team || !this.isMemberDirect(team, userId, normalized)) return null;
-    return cloneTeam(team);
+  async get(
+    teamId: string,
+    userId: string,
+    userEmail: string,
+  ): Promise<Team | null> {
+    return getTeamForUser(await getDb(), teamId, userId, userEmail);
   }
 
-  isMember(teamId: string, userId: string, userEmail: string): boolean {
-    const team = this.teams.find((t) => t.id === teamId);
-    if (!team) return false;
-    return this.isMemberDirect(team, userId, userEmail.toLowerCase());
+  async isMember(
+    teamId: string,
+    userId: string,
+    userEmail: string,
+  ): Promise<boolean> {
+    return isTeamMember(await getDb(), teamId, userId, userEmail);
   }
 
-  private isMemberDirect(team: Team, userId: string, userEmailNormalized: string): boolean {
-    if (team.ownerId === userId || team.ownerEmail.toLowerCase() === userEmailNormalized) {
-      return true;
-    }
-    return team.members.some(
-      (m) =>
-        (m.userId && m.userId === userId) ||
-        m.email.toLowerCase() === userEmailNormalized,
-    );
-  }
-
-  create(ownerId: string, ownerEmail: string, name: string): Promise<Team> {
-    const now = new Date().toISOString();
-    const ownerMember: TeamMember = {
-      userId: ownerId,
-      email: ownerEmail.toLowerCase(),
-      role: 'owner',
-      joinedAt: now,
-    };
-    const team: Team = {
+  async create(
+    ownerId: string,
+    ownerEmail: string,
+    name: string,
+  ): Promise<Team> {
+    return createTeam(await getDb(), {
       id: randomUUID(),
       name: name.trim() || 'Untitled Team',
       ownerId,
-      ownerEmail: ownerEmail.toLowerCase(),
-      members: [ownerMember],
-      createdAt: now,
-    };
-
-    return this.mutate((teams) => ({
-      next: [team, ...teams],
-      result: cloneTeam(team),
-    }));
+      ownerEmail,
+    });
   }
 
-  /** Link a user's id to any existing team invitations or ownerships matching their email. */
-  linkUser(userId: string, email: string): Promise<number> {
-    const normalized = email.toLowerCase();
-    return this.mutate((teams) => {
-      let linked = 0;
-      const next = teams.map((team) => {
-        let changed = false;
-        const members = team.members.map((m) => {
-          if (m.email.toLowerCase() === normalized && m.userId !== userId) {
-            changed = true;
-            linked += 1;
-            return { ...m, userId };
-          }
-          return m;
-        });
-        if (
-          team.ownerEmail.toLowerCase() === normalized &&
-          team.ownerId !== userId
-        ) {
-          changed = true;
-          return { ...team, ownerId: userId, members };
-        }
-        return changed ? { ...team, members } : team;
-      });
-      return { next, result: linked };
-    });
+  /** Link a user's id to any existing team invitations matching their email. */
+  async linkUser(userId: string, email: string): Promise<number> {
+    return linkUserToTeams(await getDb(), userId, email);
   }
 
   /** Teams owned by this user; account deletion is blocked while any exist. */
-  ownedBy(userId: string, userEmail: string): Team[] {
-    const normalized = userEmail.toLowerCase();
-    return this.teams
-      .filter(
-        (team) =>
-          team.ownerId === userId ||
-          team.ownerEmail.toLowerCase() === normalized,
-      )
-      .map(cloneTeam);
+  async ownedBy(userId: string, _userEmail: string): Promise<Team[]> {
+    return ownedTeams(await getDb(), userId);
   }
 
   /** Remove a user's membership from teams they do not own. */
-  removeUser(userId: string, userEmail: string): Promise<number> {
-    const normalized = userEmail.toLowerCase();
-    return this.mutate((teams) => {
-      let removed = 0;
-      const next = teams.map((team) => {
-        if (
-          team.ownerId === userId ||
-          team.ownerEmail.toLowerCase() === normalized
-        ) {
-          return team;
-        }
-        const members = team.members.filter(
-          (member) =>
-            member.userId !== userId &&
-            member.email.toLowerCase() !== normalized,
-        );
-        if (members.length === team.members.length) return team;
-        removed += 1;
-        return { ...team, members };
-      });
-      return { next, result: removed };
-    });
+  async removeUser(userId: string, userEmail: string): Promise<number> {
+    return removeUserFromTeams(await getDb(), userId, userEmail);
   }
 
-  addMember(
+  async addMember(
     teamId: string,
     requesterId: string,
     requesterEmail: string,
     memberEmail: string,
     memberUserId?: string | null,
   ): Promise<{ team: Team | null; error?: string }> {
-    return this.mutate<{ team: Team | null; error?: string }>((teams) => {
-      const team = teams.find((t) => t.id === teamId);
-      if (!team) return { next: teams, result: { team: null, error: 'Team not found.' } };
-
-      const requesterNorm = requesterEmail.toLowerCase();
-      if (!this.isMemberDirect(team, requesterId, requesterNorm)) {
-        return { next: teams, result: { team: null, error: 'Permission denied.' } };
-      }
-
-      const emailNorm = normalizeEmail(memberEmail);
-      if (!emailNorm) {
-        return { next: teams, result: { team: null, error: 'Enter a valid email address.' } };
-      }
-
-      if (team.members.some((m) => m.email.toLowerCase() === emailNorm)) {
-        return { next: teams, result: { team: null, error: 'User is already a member of this team.' } };
-      }
-
-      const now = new Date().toISOString();
-      const newMember: TeamMember = {
-        userId: memberUserId ?? null,
-        email: emailNorm,
-        role: 'member',
-        joinedAt: now,
-      };
-
-      const updated: Team = {
-        ...team,
-        members: [...team.members, newMember],
-      };
-
-      const next = teams.map((t) => (t.id === teamId ? updated : t));
-      return { next, result: { team: cloneTeam(updated) } };
+    return addTeamMember(await getDb(), {
+      teamId,
+      requesterId,
+      requesterEmail,
+      memberEmail,
+      memberUserId,
     });
   }
 
-  removeMember(
+  async removeMember(
     teamId: string,
     requesterId: string,
     requesterEmail: string,
     targetEmail: string,
   ): Promise<{ team: Team | null; error?: string }> {
-    return this.mutate<{ team: Team | null; error?: string }>((teams) => {
-      const team = teams.find((t) => t.id === teamId);
-      if (!team) return { next: teams, result: { team: null, error: 'Team not found.' } };
-
-      const requesterNorm = requesterEmail.toLowerCase();
-      const targetNorm = targetEmail.toLowerCase();
-
-      const isOwner = team.ownerId === requesterId || team.ownerEmail.toLowerCase() === requesterNorm;
-      const isSelf = requesterNorm === targetNorm;
-
-      if (!isOwner && !isSelf) {
-        return { next: teams, result: { team: null, error: 'Only the host or the member themselves can remove this member.' } };
-      }
-
-      if (team.ownerEmail.toLowerCase() === targetNorm) {
-        return { next: teams, result: { team: null, error: 'The team host cannot be removed.' } };
-      }
-
-      const updated: Team = {
-        ...team,
-        members: team.members.filter((m) => m.email.toLowerCase() !== targetNorm),
-      };
-
-      const next = teams.map((t) => (t.id === teamId ? updated : t));
-      return { next, result: { team: cloneTeam(updated) } };
+    return removeTeamMember(await getDb(), {
+      teamId,
+      requesterId,
+      requesterEmail,
+      targetEmail,
     });
-  }
-
-  private mutate<T>(
-    fn: (teams: Team[]) => { next: Team[]; result: T },
-  ): Promise<T> {
-    const run = this.opChain.then(async () => {
-      const { next, result } = fn(this.teams.map(cloneTeam));
-      await this.persist(next);
-      this.teams = next;
-      return result;
-    });
-    this.opChain = run.catch(() => {});
-    return run;
-  }
-
-  private async persist(teams: Team[]): Promise<void> {
-    const dir = path.dirname(this.file);
-    await fs.mkdir(dir, { recursive: true });
-    const temp = `${this.file}.tmp-${Date.now()}-${randomUUID().slice(0, 8)}`;
-    const payload: TeamFile = { version: 1, teams };
-    await fs.writeFile(temp, JSON.stringify(payload, null, 2), 'utf8');
-    await fs.rename(temp, this.file);
   }
 }

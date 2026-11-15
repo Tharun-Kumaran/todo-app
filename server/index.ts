@@ -15,6 +15,8 @@ import { TeamStore } from './teams';
 import { InviteStore } from './invites';
 import { RateLimiter } from './rateLimit';
 import { predictTaskFeasibility } from './prediction';
+import { closeDb, dbInfo, getDb } from './db/client';
+import { runMigrations } from './db/migrate';
 import { TimeMachineStore } from './timeMachineStore';
 import {
   TimeMachineError,
@@ -41,18 +43,6 @@ import {
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.join(here, 'data');
-const dataFile = process.env.TODO_DATA_FILE
-  ? path.resolve(process.env.TODO_DATA_FILE)
-  : path.join(dataDir, 'tasks.json');
-const usersFile = process.env.TODO_USERS_FILE
-  ? path.resolve(process.env.TODO_USERS_FILE)
-  : path.join(dataDir, 'users.json');
-const sessionsFile = process.env.TODO_SESSIONS_FILE
-  ? path.resolve(process.env.TODO_SESSIONS_FILE)
-  : path.join(dataDir, 'sessions.json');
-const teamsFile = process.env.TODO_TEAMS_FILE
-  ? path.resolve(process.env.TODO_TEAMS_FILE)
-  : path.join(dataDir, 'teams.json');
 const timeMachineFile = process.env.TODO_TIME_MACHINE_FILE
   ? path.resolve(process.env.TODO_TIME_MACHINE_FILE)
   : path.join(dataDir, 'time-machine.json');
@@ -76,10 +66,13 @@ const cookieSameSite: SameSite =
     : 'Lax';
 const corsOrigin = process.env.TODO_CORS_ORIGIN?.trim() || null;
 
-const store = new TaskStore(dataFile);
-const users = new UserStore(usersFile);
-const sessions = new SessionStore(sessionsFile, sessionTtlMs);
-const teams = new TeamStore(teamsFile);
+const db = await getDb();
+await runMigrations(db);
+
+const store = new TaskStore();
+const users = new UserStore();
+const sessions = new SessionStore(undefined, sessionTtlMs);
+const teams = new TeamStore();
 const timeMachineStore = new TimeMachineStore(timeMachineFile);
 const invites = new InviteStore(invitesFile);
 const rateLimiter = new RateLimiter();
@@ -253,24 +246,28 @@ function sendSession(req: Request, res: Response, token: string): void {
   );
 }
 
-const requireUser: RequestHandler = (req, res, next) => {
-  const token = readCookie(req.headers.cookie, SESSION_COOKIE);
-  const userId = token ? sessions.userIdFor(token) : null;
-  const user = userId ? users.findById(userId) : null;
+const requireUser: RequestHandler = async (req, res, next) => {
+  try {
+    const token = readCookie(req.headers.cookie, SESSION_COOKIE);
+    const userId = token ? await sessions.userIdFor(token) : null;
+    const user = userId ? await users.findById(userId) : null;
 
-  if (!user) {
-    if (token) {
-      void sessions.destroy(token);
-      res.setHeader('Set-Cookie', clearSessionCookie(cookieOptions(req)));
+    if (!user) {
+      if (token) {
+        void sessions.destroy(token);
+        res.setHeader('Set-Cookie', clearSessionCookie(cookieOptions(req)));
+      }
+      res.status(401).json({ error: 'Sign in required.' });
+      return;
     }
-    res.status(401).json({ error: 'Sign in required.' });
-    return;
-  }
 
-  res.locals.user = user;
-  res.locals.sessionToken = token;
-  if (token) void sessions.touch(token);
-  next();
+    res.locals.user = user;
+    res.locals.sessionToken = token;
+    if (token) void sessions.touch(token);
+    next();
+  } catch (error) {
+    next(error);
+  }
 };
 
 function currentUser(res: Response): User {
@@ -285,7 +282,7 @@ function currentUserEmail(res: Response): string {
   return currentUser(res).email;
 }
 
-function currentUserTeamIds(res: Response): string[] {
+function currentUserTeamIds(res: Response): Promise<string[]> {
   return teams.getUserTeamIds(currentUserId(res), currentUserEmail(res));
 }
 
@@ -384,7 +381,7 @@ app.post('/api/auth/register', async (req, res, next) => {
       return;
     }
 
-    if (users.findByEmail(email)) {
+    if (await users.findByEmail(email)) {
       res
         .status(409)
         .json({ error: 'An account with this email already exists.' });
@@ -418,7 +415,7 @@ app.post('/api/auth/register', async (req, res, next) => {
       consumedInvite = true;
     }
 
-    const isFirstUser = users.count() === 0;
+    const isFirstUser = (await users.count()) === 0;
     const user = await users.create(email, password);
     if (!user) {
       if (consumedInvite) await invites.release(inviteCode);
@@ -505,13 +502,17 @@ app.post('/api/auth/logout', async (req, res, next) => {
   }
 });
 
-app.get('/api/auth/sessions', requireUser, (_req, res) => {
-  res.json({
-    sessions: sessions.listForUser(
-      currentUserId(res),
-      currentSessionToken(res),
-    ),
-  });
+app.get('/api/auth/sessions', requireUser, async (_req, res, next) => {
+  try {
+    res.json({
+      sessions: await sessions.listForUser(
+        currentUserId(res),
+        currentSessionToken(res),
+      ),
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.delete('/api/auth/sessions/:id', requireUser, async (req, res, next) => {
@@ -548,22 +549,28 @@ app.post(
   },
 );
 
-app.get('/api/account/export', requireUser, (_req, res) => {
-  const userId = currentUserId(res);
-  const userEmail = currentUserEmail(res);
-  const userTeams = teams.listForUser(userId, userEmail);
-  const teamTasks = userTeams.flatMap((team) => store.listFor(userId, team.id));
-  res.setHeader(
-    'Content-Disposition',
-    `attachment; filename="todo-export-${userId}.json"`,
-  );
-  res.json({
-    exportedAt: new Date().toISOString(),
-    user: currentUser(res),
-    tasks: [...store.listFor(userId, null), ...teamTasks],
-    teams: userTeams,
-    timeMachine: timeMachineStore.exportForUser(userId),
-  });
+app.get('/api/account/export', requireUser, async (_req, res, next) => {
+  try {
+    const userId = currentUserId(res);
+    const userEmail = currentUserEmail(res);
+    const userTeams = await teams.listForUser(userId, userEmail);
+    const teamTasks = (
+      await Promise.all(userTeams.map((team) => store.listFor(userId, team.id)))
+    ).flat();
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="todo-export-${userId}.json"`,
+    );
+    res.json({
+      exportedAt: new Date().toISOString(),
+      user: currentUser(res),
+      tasks: [...(await store.listFor(userId, null)), ...teamTasks],
+      teams: userTeams,
+      timeMachine: timeMachineStore.exportForUser(userId),
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.delete('/api/account', requireUser, async (req, res, next) => {
@@ -583,7 +590,7 @@ app.delete('/api/account', requireUser, async (req, res, next) => {
       return;
     }
 
-    const ownedTeams = teams.ownedBy(userId, userEmail);
+    const ownedTeams = await teams.ownedBy(userId, userEmail);
     if (ownedTeams.length > 0) {
       res.status(409).json({
         error:
@@ -609,10 +616,17 @@ app.delete('/api/account', requireUser, async (req, res, next) => {
 
 // --- Teams ----------------------------------------------------------------
 
-app.get('/api/teams', requireUser, (_req, res) => {
-  res.json({
-    teams: teams.listForUser(currentUserId(res), currentUserEmail(res)),
-  });
+app.get('/api/teams', requireUser, async (_req, res, next) => {
+  try {
+    res.json({
+      teams: await teams.listForUser(
+        currentUserId(res),
+        currentUserEmail(res),
+      ),
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.post('/api/teams', requireUser, async (req, res, next) => {
@@ -634,17 +648,21 @@ app.post('/api/teams', requireUser, async (req, res, next) => {
   }
 });
 
-app.get('/api/teams/:id', requireUser, (req, res) => {
-  const team = teams.get(
-    routeParam(req, 'id'),
-    currentUserId(res),
-    currentUserEmail(res),
-  );
-  if (!team) {
-    res.status(404).json({ error: 'Team not found.' });
-    return;
+app.get('/api/teams/:id', requireUser, async (req, res, next) => {
+  try {
+    const team = await teams.get(
+      routeParam(req, 'id'),
+      currentUserId(res),
+      currentUserEmail(res),
+    );
+    if (!team) {
+      res.status(404).json({ error: 'Team not found.' });
+      return;
+    }
+    res.json({ team });
+  } catch (error) {
+    next(error);
   }
-  res.json({ team });
 });
 
 app.post('/api/teams/:id/members', requireUser, async (req, res, next) => {
@@ -656,7 +674,7 @@ app.post('/api/teams/:id/members', requireUser, async (req, res, next) => {
       return;
     }
 
-    const targetUser = users.findByEmail(email);
+    const targetUser = await users.findByEmail(email);
     const result = await teams.addMember(
       routeParam(req, 'id'),
       currentUserId(res),
@@ -706,33 +724,47 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/api/tasks', requireUser, (req, res) => {
-  const teamId =
-    typeof req.query.teamId === 'string' && req.query.teamId
-      ? req.query.teamId
-      : null;
-  if (teamId) {
-    if (!teams.isMember(teamId, currentUserId(res), currentUserEmail(res))) {
-      res.status(403).json({ error: 'Not a member of this team.' });
+app.get('/api/tasks', requireUser, async (req, res, next) => {
+  try {
+    const teamId =
+      typeof req.query.teamId === 'string' && req.query.teamId
+        ? req.query.teamId
+        : null;
+    if (teamId) {
+      if (
+        !(await teams.isMember(
+          teamId,
+          currentUserId(res),
+          currentUserEmail(res),
+        ))
+      ) {
+        res.status(403).json({ error: 'Not a member of this team.' });
+        return;
+      }
+      res.json({ tasks: await store.listFor(currentUserId(res), teamId) });
       return;
     }
-    res.json({ tasks: store.listFor(currentUserId(res), teamId) });
-    return;
+    res.json({ tasks: await store.listFor(currentUserId(res), null) });
+  } catch (error) {
+    next(error);
   }
-  res.json({ tasks: store.listFor(currentUserId(res), null) });
 });
 
-app.get('/api/tasks/:id', requireUser, (req, res) => {
-  const task = store.get(
-    currentUserId(res),
-    routeParam(req, 'id'),
-    currentUserTeamIds(res),
-  );
-  if (!task) {
-    res.status(404).json({ error: 'Task not found.' });
-    return;
+app.get('/api/tasks/:id', requireUser, async (req, res, next) => {
+  try {
+    const task = await store.get(
+      currentUserId(res),
+      routeParam(req, 'id'),
+      await currentUserTeamIds(res),
+    );
+    if (!task) {
+      res.status(404).json({ error: 'Task not found.' });
+      return;
+    }
+    res.json({ task });
+  } catch (error) {
+    next(error);
   }
-  res.json({ task });
 });
 
 app.post('/api/tasks', requireUser, async (req, res, next) => {
@@ -763,7 +795,11 @@ app.post('/api/tasks', requireUser, async (req, res, next) => {
       typeof body.teamId === 'string' && body.teamId ? body.teamId : null;
     if (
       teamId &&
-      !teams.isMember(teamId, currentUserId(res), currentUserEmail(res))
+      !(await teams.isMember(
+        teamId,
+        currentUserId(res),
+        currentUserEmail(res),
+      ))
     ) {
       res.status(403).json({ error: 'Not a member of this team.' });
       return;
@@ -813,7 +849,7 @@ app.post('/api/tasks', requireUser, async (req, res, next) => {
       reminderAt.value ?? null,
     );
 
-    const history = store.listFor(currentUserId(res), null);
+    const history = await store.listFor(currentUserId(res), null);
     try {
       await recordTaskCreated({
         deps: timeMachineDeps,
@@ -832,7 +868,7 @@ app.post('/api/tasks', requireUser, async (req, res, next) => {
   }
 });
 
-app.post('/api/tasks/predict', requireUser, (req, res) => {
+app.post('/api/tasks/predict', requireUser, async (req, res, next) => {
   const body = (req.body ?? {}) as {
     text?: unknown;
     dueAt?: unknown;
@@ -871,16 +907,20 @@ app.post('/api/tasks/predict', requireUser, (req, res) => {
     createdAt: now.toISOString(),
     shiftCount,
   };
-  const timeMachine = previewTimeMachine({
-    deps: timeMachineDeps,
-    userId: currentUserId(res),
-    draft,
-    history: store.listFor(currentUserId(res), null),
-    now,
-    teamTask,
-  });
+  try {
+    const timeMachine = previewTimeMachine({
+      deps: timeMachineDeps,
+      userId: currentUserId(res),
+      draft,
+      history: await store.listFor(currentUserId(res), null),
+      now,
+      teamTask,
+    });
 
-  res.json({ prediction, timeMachine });
+    res.json({ prediction, timeMachine });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.patch('/api/tasks/:id', requireUser, async (req, res, next) => {
@@ -978,10 +1018,11 @@ app.patch('/api/tasks/:id', requireUser, async (req, res, next) => {
       return;
     }
 
-    const before = store.get(
+    const teamIds = await currentUserTeamIds(res);
+    const before = await store.get(
       currentUserId(res),
       routeParam(req, 'id'),
-      currentUserTeamIds(res),
+      teamIds,
     );
     if (!before) {
       res.status(404).json({ error: 'Task not found.' });
@@ -991,7 +1032,7 @@ app.patch('/api/tasks/:id', requireUser, async (req, res, next) => {
     const task = await store.update(
       currentUserId(res),
       routeParam(req, 'id'),
-      currentUserTeamIds(res),
+      teamIds,
       patch,
     );
     if (!task) {
@@ -1005,7 +1046,7 @@ app.patch('/api/tasks/:id', requireUser, async (req, res, next) => {
         userId: currentUserId(res),
         before,
         after: task,
-        history: store.listFor(currentUserId(res), null),
+        history: await store.listFor(currentUserId(res), null),
       });
     } catch (error) {
       console.error('Time Machine update failed:', error);
@@ -1032,10 +1073,11 @@ app.post('/api/tasks/:id/milestones', requireUser, async (req, res, next) => {
       return;
     }
 
-    const before = store.get(
+    const teamIds = await currentUserTeamIds(res);
+    const before = await store.get(
       currentUserId(res),
       routeParam(req, 'id'),
-      currentUserTeamIds(res),
+      teamIds,
     );
     if (!before) {
       res.status(404).json({ error: 'Task not found.' });
@@ -1045,7 +1087,7 @@ app.post('/api/tasks/:id/milestones', requireUser, async (req, res, next) => {
     const task = await store.addMilestone(
       currentUserId(res),
       routeParam(req, 'id'),
-      currentUserTeamIds(res),
+      teamIds,
       text,
       progress.value,
     );
@@ -1060,7 +1102,7 @@ app.post('/api/tasks/:id/milestones', requireUser, async (req, res, next) => {
         userId: currentUserId(res),
         before,
         after: task,
-        history: store.listFor(currentUserId(res), null),
+        history: await store.listFor(currentUserId(res), null),
       });
     } catch (error) {
       console.error('Time Machine milestone update failed:', error);
@@ -1074,10 +1116,11 @@ app.post('/api/tasks/:id/milestones', requireUser, async (req, res, next) => {
 
 app.delete('/api/tasks/:id', requireUser, async (req, res, next) => {
   try {
-    const task = store.get(
+    const teamIds = await currentUserTeamIds(res);
+    const task = await store.get(
       currentUserId(res),
       routeParam(req, 'id'),
-      currentUserTeamIds(res),
+      teamIds,
     );
     if (!task) {
       res.status(404).json({ error: 'Task not found.' });
@@ -1097,7 +1140,7 @@ app.delete('/api/tasks/:id', requireUser, async (req, res, next) => {
     const removed = await store.remove(
       currentUserId(res),
       routeParam(req, 'id'),
-      currentUserTeamIds(res),
+      teamIds,
     );
     if (!removed) {
       res.status(404).json({ error: 'Task not found.' });
@@ -1117,15 +1160,19 @@ app.post('/api/tasks/clear-completed', requireUser, async (req, res, next) => {
         : null;
     if (
       teamId &&
-      !teams.isMember(teamId, currentUserId(res), currentUserEmail(res))
+      !(await teams.isMember(
+        teamId,
+        currentUserId(res),
+        currentUserEmail(res),
+      ))
     ) {
       res.status(403).json({ error: 'Not a member of this team.' });
       return;
     }
 
-    const completed = store
-      .listFor(currentUserId(res), teamId)
-      .filter((task) => task.done);
+    const completed = (await store.listFor(currentUserId(res), teamId)).filter(
+      (task) => task.done,
+    );
     for (const task of completed) {
       try {
         await handleTaskDeleted({
@@ -1157,7 +1204,11 @@ app.put('/api/tasks/order', requireUser, async (req, res, next) => {
         : null;
     if (
       teamId &&
-      !teams.isMember(teamId, currentUserId(res), currentUserEmail(res))
+      !(await teams.isMember(
+        teamId,
+        currentUserId(res),
+        currentUserEmail(res),
+      ))
     ) {
       res.status(403).json({ error: 'Not a member of this team.' });
       return;
@@ -1173,17 +1224,17 @@ app.put('/api/tasks/order', requireUser, async (req, res, next) => {
 app.get('/api/tasks/:id/time-machine', requireUser, async (req, res, next) => {
   try {
     const userId = currentUserId(res);
-    const task = store.get(
+    const task = await store.get(
       userId,
       routeParam(req, 'id'),
-      currentUserTeamIds(res),
+      await currentUserTeamIds(res),
     );
     if (!task) {
       res.status(404).json({ error: 'Task not found.' });
       return;
     }
 
-    const history = store.listFor(userId, null);
+    const history = await store.listFor(userId, null);
     await resolveUserOutcomes({ deps: timeMachineDeps, userId, tasks: history });
     const timeMachine = await getTimeMachineForTask({
       deps: timeMachineDeps,
@@ -1235,10 +1286,11 @@ app.post(
         return;
       }
 
-      const task = store.get(
+      const teamIds = await currentUserTeamIds(res);
+      const task = await store.get(
         userId,
         recommendation.taskId,
-        currentUserTeamIds(res),
+        teamIds,
       );
       if (!task) {
         res.status(404).json({ error: 'Task not found.' });
@@ -1260,7 +1312,7 @@ app.post(
         deps: timeMachineDeps,
         userId,
         task,
-        userTeamIds: currentUserTeamIds(res),
+        userTeamIds: teamIds,
         recommendationId: routeParam(req, 'id'),
         expectedVersion: expectedVersionRaw,
       });
@@ -1321,7 +1373,7 @@ app.get('/api/recommendations/:id', requireUser, (req, res) => {
 app.get('/api/time-machine/insights', requireUser, async (_req, res, next) => {
   try {
     const userId = currentUserId(res);
-    const tasks = store.listFor(userId, null);
+    const tasks = await store.listFor(userId, null);
     const insights = await getInsights({
       deps: timeMachineDeps,
       userId,
@@ -1411,8 +1463,10 @@ app.use(errorHandler);
 
 const server = app.listen(port, () => {
   console.log(`API listening on http://localhost:${port}`);
+  const database = dbInfo();
+  console.log(`Database: ${database.driver} at ${database.location}`);
   console.log(
-    `Data files: ${dataFile}, ${usersFile}, ${sessionsFile}, ${teamsFile}, ${timeMachineFile}, ${invitesFile}`,
+    `JSON stores: Time Machine ${timeMachineFile}, invites ${invitesFile}`,
   );
   console.log(
     `Registration: ${inviteOnly ? 'invite-only' : 'open'}; rate limiting: ${rateLimitDisabled ? 'disabled' : 'enabled'}`,
@@ -1424,7 +1478,10 @@ const server = app.listen(port, () => {
 
 const shutdown = async (signal: string) => {
   console.log(`Received ${signal}; shutting down gracefully.`);
-  server.close(() => process.exit(0));
+  server.close(async () => {
+    await closeDb().catch(() => undefined);
+    process.exit(0);
+  });
   setTimeout(() => process.exit(1), 5000).unref();
 };
 
