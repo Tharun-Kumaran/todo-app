@@ -356,10 +356,14 @@ request after a quiet period can take a minute to wake up.
    - `TODO_PUBLIC_URL`: `https://<your-service>.onrender.com` (no trailing
      slash). You can set this after Render assigns the URL and let it redeploy.
 4. Wait for the deploy to become healthy at `/api/ready`.
-5. Create the first invite from the service **Shell**:
+5. Create the first invite from the service **Shell**, or from your machine with
+   the same database URL:
 
    ```sh
    npm run invite:create -- --email you@example.com --uses 1 --days 30
+   # Local fallback:
+   DB_DRIVER=postgres DATABASE_URL='postgres://...' DATABASE_SSL=require \
+     npm run invite:create -- --email you@example.com --uses 1 --days 30
    ```
 
    Registration stays invite-only (`TODO_INVITE_ONLY=1`). To open sign-ups
