@@ -1,52 +1,42 @@
-# Render blueprint: https://render.com/docs/blueprint-spec
+# Render blueprint: free-tier deployment.
 #
-# One Docker web service plus a managed Postgres database. The disk keeps the
-# Time Machine and invite JSON stores across deploys.
+# - A free Docker web service (no persistent disk needed; Time Machine and
+#   invite state live in the `app_state` Postgres table).
+# - Postgres comes from Neon's free tier; paste its connection string when
+#   Render prompts for DATABASE_URL.
 #
 # Deploy with: Render Dashboard -> New -> Blueprint -> pick this repo.
-# Secrets marked `sync: false` are prompted for in the dashboard.
-
-databases:
-  - name: todo-db
-    databaseName: todo
-    user: todo
-    plan: basic-256mb
-    region: oregon
 
 services:
   - type: web
     name: todo-app
     runtime: docker
     dockerfilePath: ./Dockerfile
-    plan: starter
+    plan: free
     region: oregon
     healthCheckPath: /api/ready
     autoDeploy: true
-    disk:
-      name: todo-data
-      mountPath: /data
-      sizeGB: 1
     envVars:
       - key: NODE_ENV
         value: production
       - key: DB_DRIVER
         value: postgres
+      # Neon connection string, including the password. Prefer the pooled host.
       - key: DATABASE_URL
-        fromDatabase:
-          name: todo-db
-          property: connectionString
+        sync: false
       - key: DATABASE_SSL
         value: require
       - key: TODO_INVITE_ONLY
         value: "1"
       - key: TODO_SESSION_DAYS
         value: "30"
-      # Public origin used in verification and password-reset links, e.g.
-      # https://todo.example.com (no trailing slash).
+      # Public origin used in email links, e.g. https://todo-app.onrender.com
+      # (no trailing slash). Set after Render assigns the service URL.
       - key: TODO_PUBLIC_URL
         sync: false
-      # Add these after verifying a sending domain in Resend.
+      # Resend test sender: only delivers to the Resend account owner until a
+      # domain is verified. Change TODO_EMAIL_FROM when that happens.
       - key: RESEND_API_KEY
         sync: false
       - key: TODO_EMAIL_FROM
-        sync: false
+        value: "To-Do <onboarding@resend.dev>"

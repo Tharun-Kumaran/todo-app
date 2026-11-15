@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { promises as fs } from 'node:fs';
-import path from 'node:path';
+import type { Db } from './db/client.ts';
+import {
+  DbState,
+  FileState,
+  type JsonStateStore,
+} from './jsonState.ts';
 import type {
   Confidence,
   RecommendationStatus,
@@ -115,7 +119,7 @@ export interface ReminderRecord {
   updatedAt: string;
 }
 
-interface TimeMachineFile {
+export interface TimeMachineFile {
   version: 1;
   predictions: PredictionRecord[];
   recommendations: RecommendationRecord[];
@@ -124,6 +128,22 @@ interface TimeMachineFile {
   modelStates: ModelState[];
   reminders: ReminderRecord[];
   series: RecurringSeries[];
+}
+
+export function normalizeTimeMachineFile(value: unknown): TimeMachineFile {
+  const parsed = (value ?? {}) as Partial<TimeMachineFile>;
+  return {
+    version: 1,
+    predictions: Array.isArray(parsed.predictions) ? parsed.predictions : [],
+    recommendations: Array.isArray(parsed.recommendations)
+      ? parsed.recommendations
+      : [],
+    events: Array.isArray(parsed.events) ? parsed.events : [],
+    outcomes: Array.isArray(parsed.outcomes) ? parsed.outcomes : [],
+    modelStates: Array.isArray(parsed.modelStates) ? parsed.modelStates : [],
+    reminders: Array.isArray(parsed.reminders) ? parsed.reminders : [],
+    series: Array.isArray(parsed.series) ? parsed.series : [],
+  };
 }
 
 function emptyFile(): TimeMachineFile {
@@ -144,50 +164,30 @@ function clone<T>(value: T): T {
 }
 
 /**
- * Atomic JSON persistence for Time Machine snapshots, recommendations,
- * recommendation events, outcomes, reminders, recurring series, and the
- * per-user calibration state. This is the bridge store for the current
- * JSON-first runtime; the Postgres repositories will replace it in Phase 1.
+ * Time Machine snapshots, recommendations, recommendation events, outcomes,
+ * reminders, recurring series, and per-user calibration state.
+ *
+ * Local development keeps the store in a JSON file; when the app runs on
+ * Postgres the same document lives in the `app_state` table.
  */
 export class TimeMachineStore {
   private data: TimeMachineFile = emptyFile();
   private opChain: Promise<unknown> = Promise.resolve();
-  private readonly file: string;
+  private readonly state: JsonStateStore<TimeMachineFile>;
+  readonly location: string;
 
-  constructor(file: string) {
-    this.file = file;
+  constructor(fileOrState: string | JsonStateStore<TimeMachineFile>) {
+    this.state =
+      typeof fileOrState === 'string'
+        ? new FileState(fileOrState, 'Time Machine data')
+        : fileOrState;
+    this.location = this.state.location;
   }
 
   async init(): Promise<void> {
-    try {
-      const raw = await fs.readFile(this.file, 'utf8');
-      const parsed = JSON.parse(raw) as Partial<TimeMachineFile>;
-      this.data = {
-        version: 1,
-        predictions: Array.isArray(parsed.predictions) ? parsed.predictions : [],
-        recommendations: Array.isArray(parsed.recommendations)
-          ? parsed.recommendations
-          : [],
-        events: Array.isArray(parsed.events) ? parsed.events : [],
-        outcomes: Array.isArray(parsed.outcomes) ? parsed.outcomes : [],
-        modelStates: Array.isArray(parsed.modelStates) ? parsed.modelStates : [],
-        reminders: Array.isArray(parsed.reminders) ? parsed.reminders : [],
-        series: Array.isArray(parsed.series) ? parsed.series : [],
-      };
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT') {
-        console.error(
-          `Could not read ${this.file}; starting with empty Time Machine data.`,
-          error,
-        );
-        try {
-          await fs.rename(this.file, `${this.file}.corrupt-${Date.now()}`);
-        } catch {
-          // The next write recreates the file.
-        }
-      }
-      this.data = emptyFile();
+    const loaded = await this.state.load();
+    this.data = loaded ? normalizeTimeMachineFile(loaded) : emptyFile();
+    if (!loaded) {
       await this.persist(this.data);
     }
   }
@@ -602,10 +602,13 @@ export class TimeMachineStore {
   }
 
   private async persist(data: TimeMachineFile): Promise<void> {
-    const dir = path.dirname(this.file);
-    await fs.mkdir(dir, { recursive: true });
-    const temp = `${this.file}.tmp-${Date.now()}-${randomUUID().slice(0, 8)}`;
-    await fs.writeFile(temp, JSON.stringify(data, null, 2), 'utf8');
-    await fs.rename(temp, this.file);
+    await this.state.save(data);
   }
+}
+
+/** Postgres-backed Time Machine state for deployed instances. */
+export function timeMachineDbState(
+  db: Db,
+): JsonStateStore<TimeMachineFile> {
+  return new DbState(db, 'time-machine', normalizeTimeMachineFile);
 }

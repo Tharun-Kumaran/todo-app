@@ -19,7 +19,7 @@ import type {
 import { TaskStore, type TaskPatch } from './store';
 import { UserStore, normalizeEmail, passwordProblem } from './users';
 import { TeamStore } from './teams';
-import { InviteStore } from './invites';
+import { InviteStore, inviteDbState } from './invites';
 import { RateLimiter } from './rateLimit';
 import { predictTaskFeasibility } from './prediction';
 import { closeDb, dbInfo, getDb } from './db/client';
@@ -41,7 +41,7 @@ import {
   skipSeriesOccurrence,
   updateSeriesForUser,
 } from './recurrenceService';
-import { TimeMachineStore } from './timeMachineStore';
+import { TimeMachineStore, timeMachineDbState } from './timeMachineStore';
 import {
   TimeMachineError,
   applyRecommendation,
@@ -97,8 +97,12 @@ const store = new TaskStore();
 const users = new UserStore();
 const sessions = new SessionStore(undefined, sessionTtlMs);
 const teams = new TeamStore();
-const timeMachineStore = new TimeMachineStore(timeMachineFile);
-const invites = new InviteStore(invitesFile);
+const timeMachineStore = new TimeMachineStore(
+  db.driver === 'postgres' ? timeMachineDbState(db) : timeMachineFile,
+);
+const invites = new InviteStore(
+  db.driver === 'postgres' ? inviteDbState(db) : invitesFile,
+);
 const rateLimiter = new RateLimiter();
 const timeMachineDeps = { tasks: store, timeMachine: timeMachineStore };
 await Promise.all([
@@ -2050,7 +2054,7 @@ const server = app.listen(port, () => {
   const database = dbInfo();
   console.log(`Database: ${database.driver} at ${database.location}`);
   console.log(
-    `JSON stores: Time Machine ${timeMachineFile}, invites ${invitesFile}`,
+    `State stores: Time Machine ${timeMachineStore.location}, invites ${invites.location}`,
   );
   console.log(
     `Registration: ${inviteOnly ? 'invite-only' : 'open'}; rate limiting: ${rateLimitDisabled ? 'disabled' : 'enabled'}`,

@@ -12,6 +12,7 @@
     "test:db": "node scripts/test-db.mjs",
     "migrate:json": "tsx scripts/migrate-json-to-db.ts",
     "db:check": "tsx scripts/db-check.ts",
+    "state:import": "tsx scripts/import-state.ts",
     "invite:create": "tsx scripts/invites.ts create",
     "invite:list": "tsx scripts/invites.ts list",
     "invite:revoke": "tsx scripts/invites.ts revoke",

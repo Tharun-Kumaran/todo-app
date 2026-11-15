@@ -40,6 +40,7 @@ same-origin URLs in development.
 | `npm run test:db`   | Starts a throwaway PGlite API, runs the suites, cleans up |
 | `npm run migrate:json` | Imports legacy JSON data (`--dry-run` / `--apply` / `--verify`) |
 | `npm run db:check`  | Connects with the configured driver and prints the server version |
+| `npm run state:import` | Imports local Time Machine and invite JSON into Postgres |
 | `npm start`         | Runs the API and serves the built UI on `:3001`   |
 | `npm run preview`   | Serves the Vite build locally                     |
 | `npm run invite:create` | Creates an invite code (see below)            |
@@ -71,12 +72,17 @@ database at `server/data/pglite/` (git-ignored). Set `DB_DRIVER=postgres` and
 | `task_events`       | Append-only audit trail used by Time Machine          |
 | `task_outcomes`     | Completion outcomes used to calibrate predictions     |
 | `jobs`, `email_outbox` | Background maintenance jobs and outbound email log |
+| `app_state`         | Time Machine state and hashed invite codes            |
 | `schema_migrations` | Applied migration ids                                 |
 
-Two stores stay in JSON because they hold model/operator state rather than user
-records: `time-machine.json` (recommendations, outcomes, reminders, series) and
-`invites.json` (hashed invite codes). Writes go through a temp file and an
-atomic rename, and mutations are serialized to avoid lost updates.
+Time Machine state (recommendations, outcomes, reminders, series, calibration)
+and invite codes live in the `app_state` table when the app runs on Postgres.
+Each document is written in one statement, so no persistent disk is required.
+Local PGlite development keeps the same documents in `server/data/*.json` for
+inspection; mutations are serialized and written with a temp file plus rename.
+
+`npm run state:import` copies those local JSON files into `app_state` (dry run
+by default) if you move an existing setup to Postgres.
 
 Each task stores `userId`, `creatorEmail`, `teamId`, `assigneeEmail`, `dueAt`,
 `progress`, `completedAt`, `version`, and its milestones. `completedAt` is
@@ -94,8 +100,8 @@ Overrides:
 | `DATABASE_URL`        | unset                       | Postgres connection string           |
 | `DATABASE_POOL_MAX`   | `15`                        | Postgres pool size                   |
 | `DATABASE_SSL`        | unset                       | `require`, `verify`, or `disable` for the Postgres connection |
-| `TODO_TIME_MACHINE_FILE` | `server/data/time-machine.json` | Time Machine records and model state |
-| `TODO_INVITES_FILE`   | `server/data/invites.json`  | Invite-code store                    |
+| `TODO_TIME_MACHINE_FILE` | `server/data/time-machine.json` | Local-only Time Machine file (PGlite mode) |
+| `TODO_INVITES_FILE`   | `server/data/invites.json`  | Local-only invite file (PGlite mode) |
 | `TODO_INVITE_ONLY`    | unset                       | Set to `1` to require an invite code |
 | `TODO_RATE_LIMIT_DISABLED` | unset                  | Set to `1` to disable auth limits    |
 | `TODO_PUBLIC_URL`     | request origin              | Base URL used in email links         |
@@ -244,8 +250,9 @@ At most one generated task per series is open at a time. Materialization runs
 lazily on list requests and is idempotent: a series may create at most one task
 per occurrence, and deleted occurrences stay reserved through the
 `tasks_series_occurrence_uq` unique index. Series are stored per user in the
-Time Machine JSON store; generated tasks live in Postgres with their
-`source = 'recurrence'`, `series_id`, and `occurrence_at` columns.
+Time Machine state (a JSON file locally, `app_state` on Postgres); generated
+tasks live in Postgres with their `source = 'recurrence'`, `series_id`, and
+`occurrence_at` columns.
 
 ## API
 
@@ -323,24 +330,31 @@ temporary databases and do not touch your local data.
 ## Deploying to production
 
 The production image is a single Node process that serves the API and the built
-UI from the same origin. Postgres holds all account data; a persistent disk (or
-a mounted volume) holds the two JSON stores. TLS terminates at the host or a
-reverse proxy in front of the container.
+UI from the same origin. Every durable record lives in Postgres, including Time
+Machine state and invite codes in `app_state`, so no persistent disk or volume
+is needed. TLS terminates at the host or a reverse proxy in front of the
+container.
 
-### Option A: Render blueprint
+### Option A: Render free web service + Neon Postgres
 
-`render.yaml` creates a Docker web service, a managed Postgres database, and a
-1 GB disk mounted at `/data`. The service starts on the **Starter** plan because
-Render's free tier does not support persistent disks.
+This is the free-tier path used by `render.yaml`: Render hosts the Docker
+container, Neon hosts Postgres. Render's free web services sleep after about 15
+minutes without traffic, and Neon's free database autosuspends, so the first
+request after a quiet period can take a minute to wake up.
 
-1. Push this repository to GitHub (already the case for
-   `Tharun-Kumaran/todo-app`).
-2. In Render: **New → Blueprint**, select the repo, and apply the blueprint.
-3. When prompted, set the `sync: false` secrets:
-   - `TODO_PUBLIC_URL`: the public origin, e.g. `https://todo.example.com`
-     (no trailing slash). Email links use it.
-   - `RESEND_API_KEY`: from [Resend](https://resend.com/api-keys).
-   - `TODO_EMAIL_FROM`: a verified sender, e.g. `To-Do <no-reply@example.com>`.
+1. Create a free project at [Neon](https://neon.tech), copy the **pooled**
+   connection string, and check it locally:
+
+   ```sh
+   DB_DRIVER=postgres DATABASE_URL='postgres://...' DATABASE_SSL=require npm run db:check
+   ```
+
+2. In Render: **New → Blueprint**, select this repo, and apply `render.yaml`.
+3. When prompted, set the `sync: false` values:
+   - `DATABASE_URL`: the Neon connection string.
+   - `RESEND_API_KEY`: from [Resend](https://resend.com/api-keys). Optional.
+   - `TODO_PUBLIC_URL`: `https://<your-service>.onrender.com` (no trailing
+     slash). You can set this after Render assigns the URL and let it redeploy.
 4. Wait for the deploy to become healthy at `/api/ready`.
 5. Create the first invite from the service **Shell**:
 
@@ -351,15 +365,17 @@ Render's free tier does not support persistent disks.
    Registration stays invite-only (`TODO_INVITE_ONLY=1`). To open sign-ups
    later, change that env var to `0` and redeploy. Keep it on for the beta.
 
-Without `RESEND_API_KEY` the service still runs: verification and reset links
-are written to the log and `email_outbox`, but no mail is delivered.
+Resend's test sender (`onboarding@resend.dev`) only delivers to the email
+address on your Resend account. Other beta users can still register and use the
+app, but their verification and password-reset messages will not arrive until
+you verify a domain and update `TODO_EMAIL_FROM`. Without `RESEND_API_KEY` the
+service still runs and logs those links to `email_outbox`.
 
 ### Option B: any Docker host + managed Postgres
 
 Works with Fly.io, Railway, a VPS, or any container platform. Use Neon,
-Supabase, or the host's Postgres for the database.
-
-Check the connection string from your machine first:
+Supabase, or the host's Postgres for the database. Check the connection string
+from your machine first:
 
 ```sh
 DB_DRIVER=postgres \
@@ -381,7 +397,6 @@ docker run -p 3001:3001 \
   -e TODO_INVITE_ONLY=1 \
   -e RESEND_API_KEY='re_...' \
   -e TODO_EMAIL_FROM='To-Do <no-reply@example.com>' \
-  -v todo-data:/data \
   todo-app
 ```
 
@@ -399,8 +414,10 @@ Required production settings:
 | `DATABASE_SSL` | `require` for Render/Neon/Supabase; `verify` only if the CA is trusted. |
 | `TODO_PUBLIC_URL` | Public origin; otherwise email links use the request origin. |
 | `TODO_INVITE_ONLY=1` | Invite-only beta. |
-| `TODO_TIME_MACHINE_FILE`, `TODO_INVITES_FILE` | Point inside the mounted volume. The image defaults to `/data/*.json`. |
 | `RESEND_API_KEY`, `TODO_EMAIL_FROM` | Real email delivery. Optional, but required for self-serve sign-up. |
+
+`TODO_TIME_MACHINE_FILE` and `TODO_INVITES_FILE` only apply to local PGlite
+mode. On Postgres, both stores use `app_state` and need no extra configuration.
 
 Migrations run automatically at startup and are idempotent, so deploying a new
 image is enough to apply schema changes. Seed a new database by letting the
@@ -414,23 +431,21 @@ curl -fsS https://your-host/api/ready    # {"ok":true,"database":"postgres"}
 ```
 
 Then in the browser: register with an invite you created from the shell, add a
-task, mark it complete, reload, and confirm it persisted. Request a password
-reset and check that the email arrives. Sign in on a second account and confirm
-tasks are private.
+task, mark it complete, reload, and confirm it persisted. Create a recurring
+series and confirm it survives a redeploy. Sign in on a second account and
+confirm tasks are private.
 
 ### Backups and restore
 
-- **Postgres** is the source of truth for accounts and tasks. Use the provider's
-  automatic backups, or `pg_dump "$DATABASE_URL" > todo.sql` on a schedule.
-  Restore with `psql "$DATABASE_URL" < todo.sql` before starting the service.
-- **JSON stores** (`time-machine.json`, `invites.json`) live on the disk. Copy
-  them off the host periodically (`cat /data/time-machine.json`) and keep the
-  copies with the database backups. On Render, open the service Shell.
-- **Invite codes** cannot be recovered from `invites.json` (only hashes are
-  stored). Keep raw codes somewhere safe; otherwise revoke and reissue.
-- Run one instance while the JSON stores are on disk. Two instances with
-  separate disks would diverge; move those stores into Postgres before scaling
-  horizontally.
+- **Postgres** is the source of truth for accounts, tasks, Time Machine state,
+  and invite hashes. Use the provider's backups (Neon has restore and branching),
+  or `pg_dump "$DATABASE_URL" > todo.sql` on a schedule. Restore with
+  `psql "$DATABASE_URL" < todo.sql` before starting the service.
+- **Invite codes** cannot be recovered (only hashes are stored). Keep raw codes
+  somewhere safe; otherwise revoke and reissue one.
+- Run a single app instance for the beta. Time Machine state is written as one
+  JSON document per update, so concurrent writes from multiple instances could
+  overwrite each other.
 
 ### Continuous integration
 
@@ -477,5 +492,5 @@ accepted. The single-origin Docker deployment above avoids all of that.
   per-series opt-in auto-create, pause/resume, skip, and end controls
 - Light/dark theme, following the system by default
 - `/` focuses the new-task input
-- Server-side validation, idempotent migrations, and atomic JSON writes for
-  model and invite state
+- Server-side validation, idempotent migrations, and durable state (JSON files
+  locally, Postgres in production)

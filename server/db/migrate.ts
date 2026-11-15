@@ -14,9 +14,24 @@ create unique index if not exists tasks_series_occurrence_uq
   where series_id is not null and occurrence_at is not null;
 `;
 
+const APP_STATE_VERSION = '003_app_state';
+
+/**
+ * Time Machine state and invite codes used to be JSON files. Keeping them in
+ * Postgres lets the app run on hosts without a persistent disk.
+ */
+const APP_STATE_SQL = `
+create table if not exists app_state (
+  key text primary key,
+  value jsonb not null,
+  updated_at timestamptz not null default now()
+);
+`;
+
 const MIGRATIONS: Array<{ version: string; sql: string }> = [
   { version: INITIAL_SCHEMA_VERSION, sql: INITIAL_SCHEMA_SQL },
   { version: SERIES_OCCURRENCES_VERSION, sql: SERIES_OCCURRENCES_SQL },
+  { version: APP_STATE_VERSION, sql: APP_STATE_SQL },
 ];
 
 /** Version a freshly migrated database reports. */

@@ -21,6 +21,11 @@ import {
 } from '../server/repositories/tasks.ts';
 import { listTaskEvents } from '../server/repositories/events.ts';
 import { hashPassword } from '../server/password.ts';
+import { InviteStore, inviteDbState } from '../server/invites.ts';
+import {
+  TimeMachineStore,
+  timeMachineDbState,
+} from '../server/timeMachineStore.ts';
 
 async function withDb(fn) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'todo-db-'));
@@ -151,5 +156,56 @@ test('a failed transaction leaves no partial writes', async () => {
       `select id from audit_log where action = 'rollback-test'`,
     );
     assert.equal(rows.length, 0);
+  });
+});
+
+test('app_state persists Time Machine data and invites across instances', async () => {
+  await withDb(async (db) => {
+    const invites = new InviteStore(inviteDbState(db));
+    await invites.init();
+    const created = await invites.create({
+      email: 'beta@example.com',
+      maxUses: 2,
+    });
+    assert.equal(invites.list().length, 1);
+
+    // The CLI opens its own store; writes must be visible to the API.
+    const cli = new InviteStore(inviteDbState(db));
+    await cli.init();
+    assert.equal(cli.list().length, 1);
+    assert.equal(
+      (await cli.consume(created.code, 'beta@example.com')).ok,
+      true,
+    );
+
+    // The running API refreshes from Postgres before consuming.
+    const consumed = await invites.consume(created.code, 'beta@example.com');
+    assert.equal(consumed.ok, true);
+    assert.equal(consumed.invite.usedCount, 2);
+    assert.deepEqual(
+      await invites.consume(created.code, 'beta@example.com'),
+      { ok: false, reason: 'exhausted' },
+    );
+
+    const timeMachine = new TimeMachineStore(timeMachineDbState(db));
+    await timeMachine.init();
+    await timeMachine.createReminder({
+      taskId: 'task-1',
+      userId: 'user-1',
+      remindAt: new Date().toISOString(),
+      status: 'scheduled',
+    });
+
+    const reloaded = new TimeMachineStore(timeMachineDbState(db));
+    await reloaded.init();
+    assert.equal(reloaded.listReminders('user-1').length, 1);
+
+    const rows = await db.query(
+      `select value from app_state where key = 'invites'`,
+    );
+    assert.equal(rows.length, 1);
+    const raw = rows[0].value;
+    const value = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    assert.equal(value.version, 1);
   });
 });

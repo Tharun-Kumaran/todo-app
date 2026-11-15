@@ -1,6 +1,10 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { promises as fs } from 'node:fs';
-import path from 'node:path';
+import type { Db } from './db/client.ts';
+import {
+  DbState,
+  FileState,
+  type JsonStateStore,
+} from './jsonState.ts';
 import { normalizeEmail } from './users.ts';
 
 interface InviteRecord {
@@ -111,6 +115,18 @@ function normalizeInvite(value: unknown): InviteRecord | null {
   };
 }
 
+export function normalizeInviteFile(value: unknown): InviteFile {
+  const parsed = (value ?? {}) as Partial<InviteFile>;
+  return {
+    version: 1,
+    invites: Array.isArray(parsed.invites)
+      ? parsed.invites
+          .map(normalizeInvite)
+          .filter((invite): invite is InviteRecord => invite !== null)
+      : [],
+  };
+}
+
 /**
  * Invite-only beta codes. Only a SHA-256 hash of each code is stored; the raw
  * code is shown once when it is created and can never be recovered.
@@ -118,72 +134,40 @@ function normalizeInvite(value: unknown): InviteRecord | null {
 export class InviteStore {
   private data: InviteFile = emptyFile();
   private opChain: Promise<unknown> = Promise.resolve();
-  private lastMtimeMs = 0;
-  private lastSize = -1;
-  private readonly file: string;
+  private readonly state: JsonStateStore<InviteFile>;
+  readonly location: string;
 
-  constructor(file: string) {
-    this.file = file;
+  constructor(fileOrState: string | JsonStateStore<InviteFile>) {
+    this.state =
+      typeof fileOrState === 'string'
+        ? new FileState(fileOrState, 'invite codes')
+        : fileOrState;
+    this.location = this.state.location;
   }
 
   async init(): Promise<void> {
-    try {
-      const raw = await fs.readFile(this.file, 'utf8');
-      const parsed = JSON.parse(raw) as Partial<InviteFile>;
-      this.data = {
-        version: 1,
-        invites: Array.isArray(parsed.invites)
-          ? parsed.invites
-              .map(normalizeInvite)
-              .filter((invite): invite is InviteRecord => invite !== null)
-          : [],
-      };
-      await this.rememberFileStat();
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT') {
-        console.error(
-          `Could not read ${this.file}; starting with no invite codes.`,
-          error,
-        );
-        try {
-          await fs.rename(this.file, `${this.file}.corrupt-${Date.now()}`);
-        } catch {
-          // The next write recreates the file.
-        }
-      }
-      this.data = emptyFile();
+    const loaded = await this.state.load();
+    this.data = loaded ? normalizeInviteFile(loaded) : emptyFile();
+    if (!loaded) {
       await this.persist(this.data);
     }
   }
 
   /**
    * Pick up codes created or revoked by the CLI while the API process is
-   * running. The file is small, and this only reloads when its mtime changes.
+   * running. Files are only reloaded when their size or mtime changes; the
+   * Postgres store is re-read on every check.
    */
   async refresh(): Promise<void> {
     try {
-      const stat = await fs.stat(this.file);
-      if (stat.mtimeMs === this.lastMtimeMs && stat.size === this.lastSize) {
-        return;
-      }
-      const raw = await fs.readFile(this.file, 'utf8');
-      const parsed = JSON.parse(raw) as Partial<InviteFile>;
-      this.data = {
-        version: 1,
-        invites: Array.isArray(parsed.invites)
-          ? parsed.invites
-              .map(normalizeInvite)
-              .filter((invite): invite is InviteRecord => invite !== null)
-          : [],
-      };
-      this.lastMtimeMs = stat.mtimeMs;
-      this.lastSize = stat.size;
+      const { changed, value } = await this.state.refresh();
+      if (!changed) return;
+      this.data = value ? normalizeInviteFile(value) : emptyFile();
     } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT') {
-        console.error(`Could not refresh ${this.file}; keeping current invites.`, error);
-      }
+      console.error(
+        `Could not refresh ${this.location}; keeping current invites.`,
+        error,
+      );
     }
   }
 
@@ -314,21 +298,11 @@ export class InviteStore {
   }
 
   private async persist(data: InviteFile): Promise<void> {
-    await fs.mkdir(path.dirname(this.file), { recursive: true });
-    const temp = `${this.file}.tmp-${Date.now()}-${randomUUID().slice(0, 8)}`;
-    await fs.writeFile(temp, JSON.stringify(data, null, 2), 'utf8');
-    await fs.rename(temp, this.file);
-    await this.rememberFileStat();
+    await this.state.save(data);
   }
+}
 
-  private async rememberFileStat(): Promise<void> {
-    try {
-      const stat = await fs.stat(this.file);
-      this.lastMtimeMs = stat.mtimeMs;
-      this.lastSize = stat.size;
-    } catch {
-      this.lastMtimeMs = 0;
-      this.lastSize = -1;
-    }
-  }
+/** Postgres-backed invite storage for deployed instances. */
+export function inviteDbState(db: Db): JsonStateStore<InviteFile> {
+  return new DbState(db, 'invites', normalizeInviteFile);
 }

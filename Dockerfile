@@ -20,9 +20,7 @@ RUN npm run build
 FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production \
-    PORT=3001 \
-    TODO_TIME_MACHINE_FILE=/data/time-machine.json \
-    TODO_INVITES_FILE=/data/invites.json
+    PORT=3001
 
 COPY package.json package-lock.json ./
 # tsx is a runtime dependency because `npm start` executes TypeScript directly.
@@ -33,9 +31,6 @@ COPY --from=build /app/server ./server
 COPY --from=build /app/shared ./shared
 COPY --from=build /app/scripts ./scripts
 COPY --from=build /app/tsconfig.json ./tsconfig.json
-
-# JSON stores live outside /app so a volume can be mounted at /data.
-RUN mkdir -p /data
 
 EXPOSE 3001
 

@@ -1,6 +1,8 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { InviteStore } from '../server/invites';
+import { closeDb, getDb } from '../server/db/client.ts';
+import { runMigrations } from '../server/db/migrate.ts';
+import { InviteStore, inviteDbState } from '../server/invites.ts';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const defaultFile = path.join(here, '..', 'server', 'data', 'invites.json');
@@ -21,10 +23,27 @@ function numberOption(name: string): number | undefined {
   return Number.isFinite(value) ? value : undefined;
 }
 
-async function main(): Promise<void> {
+/**
+ * Deployed instances keep invites in Postgres. Local development keeps using
+ * the JSON file, matching the server's own choice.
+ */
+async function openStore(): Promise<{
+  store: InviteStore;
+  close: () => Promise<void>;
+}> {
+  const usesPostgres =
+    process.env.DB_DRIVER?.trim().toLowerCase() === 'postgres';
+  if (!usesPostgres) {
+    return { store: new InviteStore(file), close: async () => undefined };
+  }
+  const db = await getDb();
+  // The CLI may run before the server's first boot on a fresh database.
+  await runMigrations(db);
+  return { store: new InviteStore(inviteDbState(db)), close: closeDb };
+}
+
+async function run(store: InviteStore): Promise<void> {
   const command = process.argv[2] ?? 'list';
-  const store = new InviteStore(file);
-  await store.init();
 
   if (command === 'create') {
     const never = process.argv.includes('--never');
@@ -40,7 +59,7 @@ async function main(): Promise<void> {
       `Uses: ${created.invite.maxUses}; email: ${created.invite.email ?? 'any'}; expires: ${created.invite.expiresAt ?? 'never'}`,
     );
     console.log(
-      `Share this code with the beta user. It is stored only as a hash in ${file}.`,
+      `Share this code with the beta user. It is stored only as a hash in ${store.location}.`,
     );
     return;
   }
@@ -80,6 +99,16 @@ async function main(): Promise<void> {
 
   console.error('Usage: npm run invite:create|invite:list|invite:revoke -- [options]');
   process.exitCode = 1;
+}
+
+async function main(): Promise<void> {
+  const { store, close } = await openStore();
+  try {
+    await store.init();
+    await run(store);
+  } finally {
+    await close();
+  }
 }
 
 void main().catch((error) => {
