@@ -5,8 +5,10 @@ import {
   createUser,
   findUserByEmail,
   findUserById,
+  markEmailVerified,
   removeUser,
   countUsers,
+  updatePasswordHash,
   type UserRecord,
 } from './repositories/users.ts';
 import { hashPassword, verifyPassword } from './password.ts';
@@ -40,6 +42,7 @@ function toPublicUser(record: UserRecord): User {
     id: record.id,
     email: record.email,
     createdAt: record.createdAt,
+    emailVerifiedAt: record.emailVerifiedAt,
   };
 }
 
@@ -94,5 +97,23 @@ export class UserStore {
     );
     if (!record || !valid) return null;
     return toPublicUser(record);
+  }
+
+  async findRecordById(id: string): Promise<UserRecord | null> {
+    return findUserById(await getDb(), id);
+  }
+
+  async findRecordByEmail(email: string): Promise<UserRecord | null> {
+    return findUserByEmail(await getDb(), email);
+  }
+
+  /** Record a successful email verification and return the timestamp. */
+  async markEmailVerified(userId: string): Promise<string | null> {
+    return markEmailVerified(await getDb(), userId);
+  }
+
+  /** Replace the password hash after a verified reset. */
+  async setPassword(userId: string, password: string): Promise<boolean> {
+    return updatePasswordHash(await getDb(), userId, await hashPassword(password));
   }
 }

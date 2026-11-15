@@ -8,6 +8,8 @@ interface Props {
   user?: User;
   onSignOut?: () => void;
   onOpenSecurity?: () => void;
+  onOpenSettings?: () => void;
+  onOpenInsights?: () => void;
   onToggleSidebar?: () => void;
 }
 
@@ -19,6 +21,8 @@ export function Header({
   user,
   onSignOut,
   onOpenSecurity,
+  onOpenSettings,
+  onOpenInsights,
   onToggleSidebar,
 }: Props) {
   const [theme, setTheme] = useState<Theme>(initialTheme);
@@ -76,6 +80,24 @@ export function Header({
             <span className="account-email" title={user.email}>
               {user.email}
             </span>
+            {onOpenInsights && (
+              <button
+                className="signout"
+                type="button"
+                onClick={onOpenInsights}
+              >
+                Insights
+              </button>
+            )}
+            {onOpenSettings && (
+              <button
+                className="signout"
+                type="button"
+                onClick={onOpenSettings}
+              >
+                Settings
+              </button>
+            )}
             {onOpenSecurity && (
               <button
                 className="signout"

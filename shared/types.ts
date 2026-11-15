@@ -22,6 +22,8 @@ export interface User {
   id: string;
   email: string;
   createdAt: string;
+  /** ISO timestamp when the email address was verified, or null. */
+  emailVerifiedAt?: string | null;
 }
 
 export interface SessionInfo {
@@ -81,6 +83,12 @@ export interface Task {
   progress: number;
   /** Timestamped progress updates, oldest first. */
   milestones: Milestone[];
+  /** Where the task came from: a person, a recurring series, or the JSON importer. */
+  source?: 'manual' | 'recurrence' | 'import';
+  /** Series that generated this task, when `source` is `recurrence`. */
+  seriesId?: string | null;
+  /** The occurrence of the series this task represents. */
+  occurrenceAt?: string | null;
 }
 
 export type RiskLevel = 'LOW' | 'MEDIUM' | 'HIGH';
@@ -167,6 +175,25 @@ export interface RecurringSeries {
   status: 'suggested' | 'active' | 'paused' | 'ended';
   nextAt: string | null;
   createdAt: string;
+  updatedAt: string;
+  /** How many matching completions the detection used. */
+  sampleCount?: number;
+  /** Detection confidence between 0 and 1. */
+  detectionConfidence?: number | null;
+  /** Last time the series created an occurrence task. */
+  lastMaterializedAt?: string | null;
+}
+
+export interface UserSettings {
+  userId: string;
+  timezone: string;
+  locale: string;
+  predictionEnabled: boolean;
+  recommendationsEnabled: boolean;
+  sharedLearningOptIn: boolean;
+  llmOptIn: boolean;
+  recurrenceAutoCreateDefault: boolean;
+  emailRemindersEnabled: boolean;
   updatedAt: string;
 }
 

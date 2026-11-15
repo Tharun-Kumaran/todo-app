@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { Filter, Task, User } from '../shared/types';
+import * as api from './api';
 import { useAuth } from './hooks/useAuth';
 import { useTasks } from './hooks/useTasks';
 import { useTeams } from './hooks/useTeams';
+import { AccountActionScreen, type AccountAction } from './components/AccountActionScreen';
 import { AuthScreen } from './components/AuthScreen';
 import { Header } from './components/Header';
 import { Sidebar } from './components/Sidebar';
@@ -13,6 +15,26 @@ import { EmptyState } from './components/EmptyState';
 import { Filters } from './components/Filters';
 import { ProgressBar } from './components/ProgressBar';
 import { SecurityPanel } from './components/SecurityPanel';
+import { SettingsPanel } from './components/SettingsPanel';
+import { SeriesPanel } from './components/SeriesPanel';
+import { InsightsPanel } from './components/InsightsPanel';
+
+function readAccountAction(): AccountAction | null {
+  if (typeof window === 'undefined') return null;
+  const params = new URLSearchParams(window.location.search);
+  const verify = params.get('verify');
+  if (verify) return { kind: 'verify', token: verify };
+  const reset = params.get('reset');
+  if (reset) return { kind: 'reset', token: reset };
+  return null;
+}
+
+function clearAccountActionFromUrl() {
+  const url = new URL(window.location.href);
+  url.searchParams.delete('verify');
+  url.searchParams.delete('reset');
+  window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+}
 
 export default function App() {
   const {
@@ -22,7 +44,24 @@ export default function App() {
     signIn,
     signUp,
     signOut,
+    refreshUser,
   } = useAuth();
+  const [accountAction, setAccountAction] = useState<AccountAction | null>(() =>
+    readAccountAction(),
+  );
+
+  if (accountAction) {
+    return (
+      <AccountActionScreen
+        action={accountAction}
+        onFinish={() => {
+          clearAccountActionFromUrl();
+          setAccountAction(null);
+          void refreshUser().catch(() => undefined);
+        }}
+      />
+    );
+  }
 
   if (authLoading) {
     return (
@@ -41,25 +80,35 @@ export default function App() {
         initialError={authError}
         onSignIn={signIn}
         onSignUp={signUp}
+        onRequestReset={api.requestPasswordReset}
       />
     );
   }
 
   return (
-    <TodoApp key={user.id} user={user} onSignOut={() => void signOut()} />
+    <TodoApp
+      key={user.id}
+      user={user}
+      onSignOut={() => void signOut()}
+      onRefreshUser={refreshUser}
+    />
   );
 }
 
 interface TodoAppProps {
   user: User;
   onSignOut: () => void;
+  onRefreshUser: () => Promise<User | null>;
 }
 
-function TodoApp({ user, onSignOut }: TodoAppProps) {
+function TodoApp({ user, onSignOut, onRefreshUser }: TodoAppProps) {
   const { teams, createNewTeam, inviteMember, removeMember } = useTeams();
   const [activeTeamId, setActiveTeamId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [securityOpen, setSecurityOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [seriesOpen, setSeriesOpen] = useState(false);
+  const [insightsOpen, setInsightsOpen] = useState(false);
 
   const selectedTeam = useMemo(
     () => (activeTeamId ? teams.find((t) => t.id === activeTeamId) ?? null : null),
@@ -188,6 +237,8 @@ function TodoApp({ user, onSignOut }: TodoAppProps) {
           user={user}
           onSignOut={onSignOut}
           onOpenSecurity={() => setSecurityOpen(true)}
+          onOpenSettings={() => setSettingsOpen(true)}
+          onOpenInsights={() => setInsightsOpen(true)}
           onToggleSidebar={() => setSidebarOpen((v) => !v)}
         />
 
@@ -204,6 +255,13 @@ function TodoApp({ user, onSignOut }: TodoAppProps) {
               <h2>👤 My Personal Tasks</h2>
               <p>Private to you. Teammates cannot see personal tasks.</p>
             </div>
+            <button
+              type="button"
+              className="ghost-btn"
+              onClick={() => setSeriesOpen(true)}
+            >
+              Recurring series
+            </button>
           </div>
         )}
 
@@ -290,6 +348,27 @@ function TodoApp({ user, onSignOut }: TodoAppProps) {
           onClose={() => setSecurityOpen(false)}
           onSignedOut={onSignOut}
         />
+      )}
+
+      {settingsOpen && (
+        <SettingsPanel
+          user={user}
+          onClose={() => setSettingsOpen(false)}
+          onUserUpdated={() => {
+            void onRefreshUser().catch(() => undefined);
+          }}
+        />
+      )}
+
+      {seriesOpen && (
+        <SeriesPanel
+          onClose={() => setSeriesOpen(false)}
+          onTasksChanged={() => void refresh()}
+        />
+      )}
+
+      {insightsOpen && (
+        <InsightsPanel onClose={() => setInsightsOpen(false)} />
       )}
     </div>
   );

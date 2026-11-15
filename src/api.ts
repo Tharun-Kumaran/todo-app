@@ -11,6 +11,7 @@ import type {
   TimeMachineInsights,
   TimeMachineResponse,
   User,
+  UserSettings,
 } from '../shared/types';
 
 const base = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/+$/, '');
@@ -329,4 +330,105 @@ export function fetchSeries(): Promise<RecurringSeries[]> {
   return request<{ series: RecurringSeries[] }>('/api/series').then(
     (data) => data.series,
   );
+}
+
+export interface SeriesMaterializeResult {
+  series: RecurringSeries[];
+  tasks: Task[];
+}
+
+export function createSeries(input: {
+  title: string;
+  rrule: string;
+  timezone?: string;
+  autoCreate?: boolean;
+}): Promise<RecurringSeries> {
+  return request<{ series: RecurringSeries }>('/api/series', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  }).then((data) => data.series);
+}
+
+export function updateSeries(
+  id: string,
+  patch: { autoCreate?: boolean; status?: RecurringSeries['status'] },
+): Promise<RecurringSeries> {
+  return request<{ series: RecurringSeries }>(
+    `/api/series/${encodeURIComponent(id)}`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    },
+  ).then((data) => data.series);
+}
+
+export function skipSeries(id: string): Promise<RecurringSeries> {
+  return request<{ series: RecurringSeries }>(
+    `/api/series/${encodeURIComponent(id)}/skip`,
+    { method: 'POST' },
+  ).then((data) => data.series);
+}
+
+export function materializeSeries(): Promise<SeriesMaterializeResult> {
+  return request<SeriesMaterializeResult>('/api/series/materialize', {
+    method: 'POST',
+  });
+}
+
+// --- Settings -------------------------------------------------------------
+
+export function fetchSettings(): Promise<UserSettings> {
+  return request<{ settings: UserSettings }>('/api/settings').then(
+    (data) => data.settings,
+  );
+}
+
+export function updateSettings(
+  patch: Partial<Omit<UserSettings, 'userId' | 'updatedAt'>>,
+): Promise<UserSettings> {
+  return request<{ settings: UserSettings }>('/api/settings', {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  }).then((data) => data.settings);
+}
+
+// --- Email verification and password reset --------------------------------
+
+export function requestEmailVerification(): Promise<{
+  sent: boolean;
+  alreadyVerified?: boolean;
+  devToken?: string;
+}> {
+  return request<{
+    sent: boolean;
+    alreadyVerified?: boolean;
+    devToken?: string;
+  }>('/api/auth/email/verification', { method: 'POST' });
+}
+
+export function verifyEmail(token: string): Promise<User> {
+  return request<{ user: User }>('/api/auth/email/verify', {
+    method: 'POST',
+    body: JSON.stringify({ token }),
+  }).then((data) => data.user);
+}
+
+export function requestPasswordReset(email: string): Promise<{
+  sent: boolean;
+  devToken?: string;
+}> {
+  return request<{ sent: boolean; devToken?: string }>(
+    '/api/auth/password/forgot',
+    {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    },
+  );
+}
+
+export function resetPassword(token: string, password: string): Promise<void> {
+  return request<void>('/api/auth/password/reset', {
+    method: 'POST',
+    body: JSON.stringify({ token, password }),
+  });
 }

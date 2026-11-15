@@ -39,6 +39,9 @@ interface TaskRow extends Record<string, unknown> {
   updated_at: Date | string;
   version: number;
   sort_order: number;
+  source: string | null;
+  series_id: string | null;
+  occurrence_at: Date | string | null;
 }
 
 interface MilestoneRow extends Record<string, unknown> {
@@ -97,6 +100,12 @@ function toTask(row: TaskRow, milestones: Milestone[]): Task {
     updatedAt: toIso(row.updated_at),
     version: Number(row.version),
     milestones,
+    source:
+      row.source === 'recurrence' || row.source === 'import'
+        ? row.source
+        : 'manual',
+    seriesId: row.series_id,
+    occurrenceAt: toNullableIso(row.occurrence_at),
   };
 }
 
@@ -135,7 +144,7 @@ async function mapRows(
 const TASK_COLUMNS = `
   id, user_id, team_id, creator_email, assignee_email, text, done, progress,
   priority, category, due_at, scheduled_start_at, reminder_at, completed_at,
-  created_at, updated_at, version, sort_order
+  created_at, updated_at, version, sort_order, source, series_id, occurrence_at
 `;
 
 function scopeSql(
@@ -218,14 +227,16 @@ export async function createTask(
       `insert into tasks
          (id, user_id, team_id, creator_email, assignee_email, text, done,
           progress, priority, category, due_at, scheduled_start_at,
-          reminder_at, completed_at, created_at, updated_at, version, sort_order)
+          reminder_at, completed_at, created_at, updated_at, version, sort_order,
+          source, series_id, occurrence_at)
        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::timestamptz,
                $12::timestamptz, $13::timestamptz, $14::timestamptz,
                $15::timestamptz, $16::timestamptz, $17,
                coalesce((select min(sort_order) - 1 from tasks
                           where user_id = $2
                             and team_id is not distinct from $3
-                            and deleted_at is null), 0))
+                            and deleted_at is null), 0),
+               $18, $19::uuid, $20::timestamptz)
        returning ${TASK_COLUMNS}`,
       [
         task.id,
@@ -245,6 +256,9 @@ export async function createTask(
         task.createdAt,
         task.updatedAt,
         task.version,
+        task.source ?? 'manual',
+        task.seriesId ?? null,
+        task.occurrenceAt ?? null,
       ],
     );
     await insertTaskEvent(tx, {
@@ -256,12 +270,33 @@ export async function createTask(
         dueAt: task.dueAt,
         priority: task.priority,
         category: task.category,
-        source: 'manual',
+        source: task.source ?? 'manual',
+        ...(task.seriesId
+          ? { seriesId: task.seriesId, occurrenceAt: task.occurrenceAt ?? null }
+          : {}),
       },
       occurredAt: task.createdAt,
     });
     return toTask(rows[0], []);
   });
+}
+
+/**
+ * True when this series already produced a task for the occurrence, including
+ * tasks the user later deleted. Deleted rows still block duplicates.
+ */
+export async function hasSeriesOccurrence(
+  db: Db,
+  seriesId: string,
+  occurrenceAt: string,
+): Promise<boolean> {
+  const rows = await db.query(
+    `select 1 from tasks
+      where series_id = $1 and occurrence_at = $2::timestamptz
+      limit 1`,
+    [seriesId, occurrenceAt],
+  );
+  return rows.length > 0;
 }
 
 function completedEvent(

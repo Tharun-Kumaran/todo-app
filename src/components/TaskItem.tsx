@@ -365,6 +365,15 @@ export function TaskItem({
           </span>
         )}
 
+        {task.source === 'recurrence' && !editing && (
+          <span
+            className="series-badge"
+            title="Created automatically by a recurring series"
+          >
+            🔁 From series
+          </span>
+        )}
+
         {due && !editing && (
           <span className={`due-badge tone-${due.tone}`} title={due.title}>
             <CalendarIcon />

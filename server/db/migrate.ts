@@ -1,9 +1,27 @@
 import type { Db } from './client.ts';
 import { INITIAL_SCHEMA_SQL, INITIAL_SCHEMA_VERSION } from './schema.ts';
 
+const SERIES_OCCURRENCES_VERSION = '002_series_occurrences';
+
+/**
+ * A series may create at most one task per occurrence. The unique index also
+ * covers soft-deleted rows on purpose: skipping or deleting an occurrence must
+ * not cause the scheduler to recreate it.
+ */
+const SERIES_OCCURRENCES_SQL = `
+create unique index if not exists tasks_series_occurrence_uq
+  on tasks (series_id, occurrence_at)
+  where series_id is not null and occurrence_at is not null;
+`;
+
 const MIGRATIONS: Array<{ version: string; sql: string }> = [
   { version: INITIAL_SCHEMA_VERSION, sql: INITIAL_SCHEMA_SQL },
+  { version: SERIES_OCCURRENCES_VERSION, sql: SERIES_OCCURRENCES_SQL },
 ];
+
+/** Version a freshly migrated database reports. */
+export const LATEST_SCHEMA_VERSION =
+  MIGRATIONS[MIGRATIONS.length - 1]?.version ?? INITIAL_SCHEMA_VERSION;
 
 /**
  * Apply migrations in order. Each migration and its bookkeeping row commit

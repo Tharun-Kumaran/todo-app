@@ -6,6 +6,7 @@ export interface UserRecord {
   email: string;
   passwordHash: string;
   createdAt: string;
+  emailVerifiedAt: string | null;
 }
 
 interface UserRow extends Record<string, unknown> {
@@ -13,6 +14,7 @@ interface UserRow extends Record<string, unknown> {
   email: string;
   password_hash: string;
   created_at: Date | string;
+  email_verified_at: Date | string | null;
 }
 
 function toIso(value: Date | string): string {
@@ -24,6 +26,7 @@ export function toUser(row: UserRow): User {
     id: row.id,
     email: row.email,
     createdAt: toIso(row.created_at),
+    emailVerifiedAt: row.email_verified_at ? toIso(row.email_verified_at) : null,
   };
 }
 
@@ -33,6 +36,7 @@ export function toUserRecord(row: UserRow): UserRecord {
     email: row.email,
     passwordHash: row.password_hash,
     createdAt: toIso(row.created_at),
+    emailVerifiedAt: row.email_verified_at ? toIso(row.email_verified_at) : null,
   };
 }
 
@@ -48,7 +52,7 @@ export async function findUserById(
   id: string,
 ): Promise<UserRecord | null> {
   const rows = await db.query<UserRow>(
-    `select id, email, password_hash, created_at
+    `select id, email, password_hash, created_at, email_verified_at
        from users
       where id = $1 and deleted_at is null`,
     [id],
@@ -61,7 +65,7 @@ export async function findUserByEmail(
   email: string,
 ): Promise<UserRecord | null> {
   const rows = await db.query<UserRow>(
-    `select id, email, password_hash, created_at
+    `select id, email, password_hash, created_at, email_verified_at
        from users
       where lower(email) = lower($1) and deleted_at is null`,
     [email],
@@ -78,7 +82,7 @@ export async function createUser(
       const rows = await tx.query<UserRow>(
         `insert into users (id, email, password_hash, created_at, updated_at)
          values ($1, lower($2), $3, coalesce($4::timestamptz, now()), now())
-         returning id, email, password_hash, created_at`,
+         returning id, email, password_hash, created_at, email_verified_at`,
         [
           input.id,
           input.email,
@@ -113,4 +117,36 @@ export async function ensureUserSettings(
      on conflict (user_id) do nothing`,
     [userId],
   );
+}
+
+export async function markEmailVerified(
+  db: Db,
+  userId: string,
+): Promise<string | null> {
+  const rows = await db.query<{ email_verified_at: Date | string | null }>(
+    `update users
+        set email_verified_at = coalesce(email_verified_at, now()),
+            updated_at = now()
+      where id = $1 and deleted_at is null
+      returning email_verified_at`,
+    [userId],
+  );
+  const value = rows[0]?.email_verified_at;
+  return value ? toIso(value) : null;
+}
+
+export async function updatePasswordHash(
+  db: Db,
+  userId: string,
+  passwordHash: string,
+): Promise<boolean> {
+  const rows = await db.query<{ id: string }>(
+    `update users
+        set password_hash = $2,
+            updated_at = now()
+      where id = $1 and deleted_at is null
+      returning id`,
+    [userId, passwordHash],
+  );
+  return rows.length > 0;
 }

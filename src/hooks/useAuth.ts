@@ -39,6 +39,13 @@ export function useAuth() {
     return () => window.removeEventListener('todo:unauthorized', onUnauthorized);
   }, []);
 
+  const refreshUser = useCallback(async () => {
+    const current = await api.fetchMe();
+    setUser(current);
+    setError(null);
+    return current;
+  }, []);
+
   const signIn = useCallback(async (email: string, password: string) => {
     const next = await api.login(email, password);
     setUser(next);
@@ -66,5 +73,5 @@ export function useAuth() {
     }
   }, []);
 
-  return { user, loading, error, signIn, signUp, signOut };
+  return { user, loading, error, signIn, signUp, signOut, refreshUser };
 }

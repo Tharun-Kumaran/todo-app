@@ -4,11 +4,18 @@ import express, {
   type RequestHandler,
   type Response,
 } from 'express';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { Priority, TaskCategory, User } from '../shared/types';
+import type {
+  Priority,
+  RecurringSeries,
+  TaskCategory,
+  TimeMachineResponse,
+  User,
+  UserSettings,
+} from '../shared/types';
 import { TaskStore, type TaskPatch } from './store';
 import { UserStore, normalizeEmail, passwordProblem } from './users';
 import { TeamStore } from './teams';
@@ -17,6 +24,23 @@ import { RateLimiter } from './rateLimit';
 import { predictTaskFeasibility } from './prediction';
 import { closeDb, dbInfo, getDb } from './db/client';
 import { runMigrations } from './db/migrate';
+import {
+  getUserSettings,
+  updateUserSettings,
+} from './repositories/settings';
+import {
+  consumeEmailToken,
+  createEmailToken,
+  revokeEmailTokens,
+} from './repositories/emailTokens';
+import { sendEmail } from './email';
+import { canonicalRrule, parseRrule } from '../shared/recurrence';
+import {
+  createSeries,
+  runSeriesMaintenance,
+  skipSeriesOccurrence,
+  updateSeriesForUser,
+} from './recurrenceService';
 import { TimeMachineStore } from './timeMachineStore';
 import {
   TimeMachineError,
@@ -284,6 +308,74 @@ function currentUserEmail(res: Response): string {
 
 function currentUserTeamIds(res: Response): Promise<string[]> {
   return teams.getUserTeamIds(currentUserId(res), currentUserEmail(res));
+}
+
+async function settingsForUser(userId: string): Promise<UserSettings> {
+  const settings = await getUserSettings(db, userId);
+  if (settings) return settings;
+  return updateUserSettings(db, userId, {});
+}
+
+/** Apply privacy choices without mutating the persisted forecast. */
+function filterBySettings(
+  timeMachine: TimeMachineResponse,
+  settings: UserSettings,
+): TimeMachineResponse {
+  if (settings.recommendationsEnabled) return timeMachine;
+  return { ...timeMachine, recommendations: [] };
+}
+
+function emailTokenHash(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
+}
+
+function newEmailToken(): string {
+  return randomBytes(32).toString('base64url');
+}
+
+function devTokenPayload(token: string): { devToken?: string } {
+  // Local development and the test suite need the link without a mail server.
+  // Production responses never contain tokens.
+  return process.env.NODE_ENV === 'production' ? {} : { devToken: token };
+}
+
+function publicBaseUrl(req: Request): string {
+  const configured = process.env.TODO_PUBLIC_URL?.trim();
+  if (configured) return configured.replace(/\/+$/, '');
+  return `${req.protocol}://${req.get('host') ?? `localhost:${port}`}`;
+}
+
+function validTimezone(value: string): boolean {
+  if (!value || value.length > 64) return false;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function validLocale(value: string): boolean {
+  if (!value || value.length > 35) return false;
+  try {
+    return Intl.getCanonicalLocales(value).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+const SERIES_STATUSES: RecurringSeries['status'][] = [
+  'suggested',
+  'active',
+  'paused',
+  'ended',
+];
+
+function isSeriesStatus(value: unknown): value is RecurringSeries['status'] {
+  return (
+    typeof value === 'string' &&
+    SERIES_STATUSES.includes(value as RecurringSeries['status'])
+  );
 }
 
 function routeParam(req: Request, name: string): string {
@@ -614,6 +706,286 @@ app.delete('/api/account', requireUser, async (req, res, next) => {
   }
 });
 
+// --- Settings -------------------------------------------------------------
+
+app.get('/api/settings', requireUser, async (_req, res, next) => {
+  try {
+    res.json({ settings: await settingsForUser(currentUserId(res)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch('/api/settings', requireUser, async (req, res, next) => {
+  try {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    if (typeof body !== 'object' || Array.isArray(body)) {
+      res.status(400).json({ error: 'Settings must be a JSON object.' });
+      return;
+    }
+
+    const booleans = [
+      'predictionEnabled',
+      'recommendationsEnabled',
+      'sharedLearningOptIn',
+      'llmOptIn',
+      'recurrenceAutoCreateDefault',
+      'emailRemindersEnabled',
+    ] as const;
+    const allowed = new Set<string>([...booleans, 'timezone', 'locale']);
+    const unknown = Object.keys(body).filter((key) => !allowed.has(key));
+    if (unknown.length > 0) {
+      res.status(400).json({
+        error: `Unknown setting${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}.`,
+      });
+      return;
+    }
+    if (Object.keys(body).length === 0) {
+      res.status(400).json({ error: 'No settings were provided.' });
+      return;
+    }
+
+    const patch: Parameters<typeof updateUserSettings>[2] = {};
+    for (const field of booleans) {
+      if (field in body) {
+        if (typeof body[field] !== 'boolean') {
+          res.status(400).json({ error: `\`${field}\` must be true or false.` });
+          return;
+        }
+        patch[field] = body[field];
+      }
+    }
+    if ('timezone' in body) {
+      if (typeof body.timezone !== 'string' || !validTimezone(body.timezone)) {
+        res.status(400).json({
+          error: '`timezone` must be a valid IANA timezone such as Europe/London.',
+        });
+        return;
+      }
+      patch.timezone = body.timezone;
+    }
+    if ('locale' in body) {
+      if (typeof body.locale !== 'string' || !validLocale(body.locale)) {
+        res.status(400).json({
+          error: '`locale` must be a valid language tag such as en-US.',
+        });
+        return;
+      }
+      patch.locale = body.locale;
+    }
+
+    res.json({
+      settings: await updateUserSettings(db, currentUserId(res), patch),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// --- Email verification and password reset --------------------------------
+
+app.post(
+  '/api/auth/email/verification',
+  requireUser,
+  async (req, res, next) => {
+    try {
+      const user = currentUser(res);
+      if (user.emailVerifiedAt) {
+        res.json({ sent: false, alreadyVerified: true });
+        return;
+      }
+      if (
+        !rateLimit(req, res, [
+          {
+            key: `verify:user:${user.id}`,
+            limit: 5,
+            windowMs: 60 * 60_000,
+          },
+        ])
+      ) {
+        return;
+      }
+
+      const token = newEmailToken();
+      const expiresAt = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
+      await createEmailToken(db, {
+        id: randomUUID(),
+        userId: user.id,
+        kind: 'verify_email',
+        tokenHash: emailTokenHash(token),
+        expiresAt,
+      });
+
+      const link = `${publicBaseUrl(req)}/?verify=${encodeURIComponent(token)}`;
+      await sendEmail({
+        to: user.email,
+        subject: 'Verify your To-Do email address',
+        text: `Verify your email address to finish setting up your account:\n\n${link}\n\nThis link expires in 24 hours.`,
+        template: 'verify_email',
+        userId: user.id,
+        payload: { expiresAt },
+      });
+
+      res.json({ sent: true, ...devTokenPayload(token) });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+app.post('/api/auth/email/verify', async (req, res, next) => {
+  try {
+    if (
+      !rateLimit(req, res, [
+        {
+          key: `verify:ip:${clientIp(req)}`,
+          limit: 60,
+          windowMs: 60 * 60_000,
+        },
+      ])
+    ) {
+      return;
+    }
+
+    const token = (req.body as { token?: unknown } | undefined)?.token;
+    if (typeof token !== 'string' || token.length < 20 || token.length > 200) {
+      res.status(400).json({ error: 'Enter a valid verification link.' });
+      return;
+    }
+
+    const record = await consumeEmailToken(
+      db,
+      emailTokenHash(token),
+      'verify_email',
+    );
+    if (!record) {
+      res.status(400).json({
+        error: 'This verification link is invalid or has expired.',
+        code: 'INVALID_OR_EXPIRED_TOKEN',
+      });
+      return;
+    }
+
+    await users.markEmailVerified(record.userId);
+    res.json({ user: await users.findById(record.userId) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/auth/password/forgot', async (req, res, next) => {
+  try {
+    const email = normalizeEmail(
+      (req.body as { email?: unknown } | undefined)?.email,
+    );
+    if (!email) {
+      res.status(400).json({ error: 'Enter a valid email address.' });
+      return;
+    }
+    if (
+      !rateLimit(req, res, [
+        {
+          key: `forgot:ip:${clientIp(req)}`,
+          limit: 20,
+          windowMs: 60 * 60_000,
+        },
+        {
+          key: `forgot:email:${email}`,
+          limit: 5,
+          windowMs: 60 * 60_000,
+        },
+      ])
+    ) {
+      return;
+    }
+
+    // Always answer the same way so the endpoint cannot enumerate accounts.
+    const user = await users.findByEmail(email);
+    if (!user) {
+      res.json({ sent: true });
+      return;
+    }
+
+    const token = newEmailToken();
+    const expiresAt = new Date(Date.now() + 60 * 60_000).toISOString();
+    await createEmailToken(db, {
+      id: randomUUID(),
+      userId: user.id,
+      kind: 'reset_password',
+      tokenHash: emailTokenHash(token),
+      expiresAt,
+    });
+
+    const link = `${publicBaseUrl(req)}/?reset=${encodeURIComponent(token)}`;
+    await sendEmail({
+      to: user.email,
+      subject: 'Reset your To-Do password',
+      text: `Somebody requested a password reset for your To-Do account.\n\n${link}\n\nThis link expires in one hour. If this was not you, ignore this email.`,
+      template: 'reset_password',
+      userId: user.id,
+      payload: { expiresAt },
+    });
+
+    res.json({ sent: true, ...devTokenPayload(token) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/auth/password/reset', async (req, res, next) => {
+  try {
+    if (
+      !rateLimit(req, res, [
+        {
+          key: `reset:ip:${clientIp(req)}`,
+          limit: 30,
+          windowMs: 60 * 60_000,
+        },
+      ])
+    ) {
+      return;
+    }
+
+    const body = (req.body ?? {}) as { token?: unknown; password?: unknown };
+    const token = body.token;
+    if (typeof token !== 'string' || token.length < 20 || token.length > 200) {
+      res.status(400).json({ error: 'Enter a valid password reset link.' });
+      return;
+    }
+    const password = typeof body.password === 'string' ? body.password : '';
+    const problem = passwordProblem(password);
+    if (problem) {
+      res.status(400).json({ error: problem });
+      return;
+    }
+
+    const record = await consumeEmailToken(
+      db,
+      emailTokenHash(token),
+      'reset_password',
+    );
+    if (!record) {
+      res.status(400).json({
+        error: 'This password reset link is invalid or has expired.',
+        code: 'INVALID_OR_EXPIRED_TOKEN',
+      });
+      return;
+    }
+
+    const changed = await users.setPassword(record.userId, password);
+    if (!changed) {
+      res.status(404).json({ error: 'Account not found.' });
+      return;
+    }
+    await revokeEmailTokens(db, record.userId, 'reset_password');
+    await sessions.destroyAllForUser(record.userId);
+    res.setHeader('Set-Cookie', clearSessionCookie(cookieOptions(req)));
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
 // --- Teams ----------------------------------------------------------------
 
 app.get('/api/teams', requireUser, async (_req, res, next) => {
@@ -744,6 +1116,20 @@ app.get('/api/tasks', requireUser, async (req, res, next) => {
       res.json({ tasks: await store.listFor(currentUserId(res), teamId) });
       return;
     }
+
+    // Detect recurring patterns and create opted-in occurrences. A scheduling
+    // failure must never block the task list.
+    try {
+      const history = await store.listFor(currentUserId(res), null);
+      await runSeriesMaintenance({
+        deps: timeMachineDeps,
+        userId: currentUserId(res),
+        tasks: history,
+      });
+    } catch (error) {
+      console.error('Recurring series maintenance failed:', error);
+    }
+
     res.json({ tasks: await store.listFor(currentUserId(res), null) });
   } catch (error) {
     next(error);
@@ -851,12 +1237,15 @@ app.post('/api/tasks', requireUser, async (req, res, next) => {
 
     const history = await store.listFor(currentUserId(res), null);
     try {
-      await recordTaskCreated({
-        deps: timeMachineDeps,
-        userId: currentUserId(res),
-        task,
-        history,
-      });
+      const settings = await settingsForUser(currentUserId(res));
+      if (settings.predictionEnabled) {
+        await recordTaskCreated({
+          deps: timeMachineDeps,
+          userId: currentUserId(res),
+          task,
+          history,
+        });
+      }
     } catch (error) {
       // A prediction failure must never block task creation.
       console.error('Time Machine snapshot failed:', error);
@@ -908,16 +1297,22 @@ app.post('/api/tasks/predict', requireUser, async (req, res, next) => {
     shiftCount,
   };
   try {
+    const settings = await settingsForUser(currentUserId(res));
     const timeMachine = previewTimeMachine({
       deps: timeMachineDeps,
       userId: currentUserId(res),
       draft,
-      history: await store.listFor(currentUserId(res), null),
+      history: settings.predictionEnabled
+        ? await store.listFor(currentUserId(res), null)
+        : [],
       now,
       teamTask,
     });
 
-    res.json({ prediction, timeMachine });
+    res.json({
+      prediction,
+      timeMachine: filterBySettings(timeMachine, settings),
+    });
   } catch (error) {
     next(error);
   }
@@ -1236,13 +1631,15 @@ app.get('/api/tasks/:id/time-machine', requireUser, async (req, res, next) => {
 
     const history = await store.listFor(userId, null);
     await resolveUserOutcomes({ deps: timeMachineDeps, userId, tasks: history });
+    const settings = await settingsForUser(userId);
     const timeMachine = await getTimeMachineForTask({
       deps: timeMachineDeps,
       userId,
       task,
-      history,
+      history: settings.predictionEnabled ? history : [],
+      persist: settings.predictionEnabled,
     });
-    res.json({ timeMachine });
+    res.json({ timeMachine: filterBySettings(timeMachine, settings) });
   } catch (error) {
     next(error);
   }
@@ -1316,6 +1713,21 @@ app.post(
         recommendationId: routeParam(req, 'id'),
         expectedVersion: expectedVersionRaw,
       });
+
+      // Record the user's display timezone without changing their per-series
+      // auto-create choice. A series created by this recommendation starts with
+      // auto-create off and only creates tasks after the user opts in.
+      if (result.series) {
+        const settings = await settingsForUser(userId);
+        const series = {
+          ...result.series,
+          timezone: settings.timezone,
+          updatedAt: new Date().toISOString(),
+        };
+        await timeMachineStore.upsertSeries(series);
+        result.series = series;
+      }
+
       res.json(result);
     } catch (error) {
       if (error instanceof TimeMachineError) {
@@ -1395,8 +1807,165 @@ app.get('/api/time-machine/outcomes', requireUser, (req, res) => {
   });
 });
 
-app.get('/api/series', requireUser, (_req, res) => {
-  res.json({ series: timeMachineStore.listSeries(currentUserId(res)) });
+app.get('/api/series', requireUser, async (_req, res, next) => {
+  try {
+    const userId = currentUserId(res);
+    const tasks = await store.listFor(userId, null);
+    const series = await runSeriesMaintenance({
+      deps: timeMachineDeps,
+      userId,
+      tasks,
+    });
+    res.json({ series });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/series', requireUser, async (req, res, next) => {
+  try {
+    const body = (req.body ?? {}) as {
+      title?: unknown;
+      rrule?: unknown;
+      timezone?: unknown;
+      autoCreate?: unknown;
+    };
+    const title = readText(body.title, 200);
+    if (!title) {
+      res.status(400).json({ error: 'Series title is required.' });
+      return;
+    }
+    const rrule = typeof body.rrule === 'string' ? body.rrule.trim() : '';
+    if (!parseRrule(rrule)) {
+      res.status(400).json({
+        error:
+          '`rrule` must be a DAILY, WEEKLY, or MONTHLY recurrence rule.',
+      });
+      return;
+    }
+    const canonical = canonicalRrule(rrule) ?? rrule;
+
+    const settings = await settingsForUser(currentUserId(res));
+    const timezone =
+      typeof body.timezone === 'string' && body.timezone.trim()
+        ? body.timezone.trim()
+        : settings.timezone;
+    if (!validTimezone(timezone)) {
+      res.status(400).json({
+        error: '`timezone` must be a valid IANA timezone.',
+      });
+      return;
+    }
+    if (body.autoCreate !== undefined && typeof body.autoCreate !== 'boolean') {
+      res.status(400).json({ error: '`autoCreate` must be true or false.' });
+      return;
+    }
+
+    const series = await createSeries({
+      deps: timeMachineDeps,
+      userId: currentUserId(res),
+      title,
+      rrule: canonical,
+      timezone,
+      autoCreate:
+        body.autoCreate === undefined
+          ? settings.recurrenceAutoCreateDefault
+          : body.autoCreate,
+    });
+    if (!series) {
+      res.status(409).json({
+        error: 'A series with that title already exists.',
+        code: 'SERIES_TITLE_TAKEN',
+      });
+      return;
+    }
+    res.status(201).json({ series });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch('/api/series/:id', requireUser, async (req, res, next) => {
+  try {
+    const body = (req.body ?? {}) as {
+      autoCreate?: unknown;
+      status?: unknown;
+    };
+    const patch: {
+      autoCreate?: boolean;
+      status?: RecurringSeries['status'];
+    } = {};
+    if ('autoCreate' in body) {
+      if (typeof body.autoCreate !== 'boolean') {
+        res.status(400).json({ error: '`autoCreate` must be true or false.' });
+        return;
+      }
+      patch.autoCreate = body.autoCreate;
+    }
+    if ('status' in body) {
+      if (!isSeriesStatus(body.status)) {
+        res.status(400).json({
+          error: '`status` must be suggested, active, paused, or ended.',
+        });
+        return;
+      }
+      patch.status = body.status;
+    }
+    if (Object.keys(patch).length === 0) {
+      res.status(400).json({ error: 'No series changes were provided.' });
+      return;
+    }
+
+    const series = await updateSeriesForUser({
+      deps: timeMachineDeps,
+      userId: currentUserId(res),
+      id: routeParam(req, 'id'),
+      patch,
+    });
+    if (!series) {
+      res.status(404).json({ error: 'Series not found.' });
+      return;
+    }
+    res.json({ series });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/series/:id/skip', requireUser, async (req, res, next) => {
+  try {
+    const userId = currentUserId(res);
+    const tasks = await store.listFor(userId, null);
+    const series = await skipSeriesOccurrence({
+      deps: timeMachineDeps,
+      userId,
+      id: routeParam(req, 'id'),
+      tasks,
+    });
+    if (!series) {
+      res.status(404).json({ error: 'Series not found.' });
+      return;
+    }
+    res.json({ series });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/series/materialize', requireUser, async (_req, res, next) => {
+  try {
+    const userId = currentUserId(res);
+    const tasks = await store.listFor(userId, null);
+    const series = await runSeriesMaintenance({
+      deps: timeMachineDeps,
+      userId,
+      tasks,
+      force: true,
+    });
+    res.json({ series, tasks: await store.listFor(userId, null) });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.get('/api/reminders', requireUser, (req, res) => {

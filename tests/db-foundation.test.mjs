@@ -5,7 +5,11 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createDatabase } from '../server/db/client.ts';
-import { runMigrations, schemaVersion } from '../server/db/migrate.ts';
+import {
+  LATEST_SCHEMA_VERSION,
+  runMigrations,
+  schemaVersion,
+} from '../server/db/migrate.ts';
 import { createUser } from '../server/repositories/users.ts';
 import {
   addMilestones,
@@ -57,7 +61,7 @@ function taskFor(userId, overrides = {}) {
 
 test('migrations apply once and report the schema version', async () => {
   await withDb(async (db) => {
-    assert.equal(await schemaVersion(db), '001_initial');
+    assert.equal(await schemaVersion(db), LATEST_SCHEMA_VERSION);
     assert.deepEqual(await runMigrations(db), []);
   });
 });

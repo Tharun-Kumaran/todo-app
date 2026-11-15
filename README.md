@@ -55,19 +55,21 @@ npm start
 
 ## Data
 
-Accounts, sessions, teams, tasks, task events, and outcomes live in Postgres.
-Local development uses an embedded [PGlite](https://pglite.dev/) database at
-`server/data/pglite/` (git-ignored). Set `DB_DRIVER=postgres` and
+Accounts, sessions, teams, tasks, settings, email state, and outcomes live in
+Postgres. Local development uses an embedded [PGlite](https://pglite.dev/)
+database at `server/data/pglite/` (git-ignored). Set `DB_DRIVER=postgres` and
 `DATABASE_URL` to use a Postgres server instead.
 
 | Table               | Contents                                              |
 | ------------------- | ----------------------------------------------------- |
 | `users`, `user_settings` | Accounts (scrypt PHC hashes) and per-user preferences |
 | `sessions`          | Session token hashes with expiry                      |
+| `email_tokens`      | Hashed one-time verification and reset tokens         |
 | `teams`, `team_members` | Teams, owners, and invited members                |
 | `tasks`, `task_milestones` | Tasks with deadlines, progress, and milestone comments |
 | `task_events`       | Append-only audit trail used by Time Machine          |
 | `task_outcomes`     | Completion outcomes used to calibrate predictions     |
+| `jobs`, `email_outbox` | Background maintenance jobs and outbound email log |
 | `schema_migrations` | Applied migration ids                                 |
 
 Two stores stay in JSON because they hold model/operator state rather than user
@@ -94,6 +96,9 @@ Overrides:
 | `TODO_INVITES_FILE`   | `server/data/invites.json`  | Invite-code store                    |
 | `TODO_INVITE_ONLY`    | unset                       | Set to `1` to require an invite code |
 | `TODO_RATE_LIMIT_DISABLED` | unset                  | Set to `1` to disable auth limits    |
+| `TODO_PUBLIC_URL`     | request origin              | Base URL used in email links         |
+| `RESEND_API_KEY`      | unset                       | Send email through Resend            |
+| `TODO_EMAIL_FROM`     | `To-Do <no-reply@example.com>` | From address for outgoing email  |
 | `TODO_SESSION_DAYS`   | `30`                        | Session lifetime (1–365 days)        |
 | `TODO_COOKIE_SAMESITE`| `lax`                       | Set to `none` for cross-site cookies |
 | `TODO_COOKIE_SECURE`  | auto over HTTPS             | Force the `Secure` cookie flag       |
@@ -142,6 +147,12 @@ Every `/api/tasks` route requires a session. Personal tasks are scoped strictly
 to the authenticated user. Team tasks are scoped to verified members of that
 team.
 
+Email verification and password reset use short-lived, single-use tokens. Only a
+SHA-256 hash of each token is stored. Resetting a password revokes every existing
+session. Without `RESEND_API_KEY`, messages are written to `email_outbox` and the
+server log instead of being delivered; development builds also return the token
+so the flow can be tested without a mail server.
+
 Auth hardening in this build:
 
 - Login and registration attempts are rate-limited per IP and per email.
@@ -153,6 +164,23 @@ Auth hardening in this build:
 - Security headers are set on every response (`nosniff`, `DENY` framing,
   no-referrer, permissions policy, HSTS in production).
 - `TODO_INVITE_ONLY=1` turns registration into an invite-only beta.
+
+## Settings and privacy
+
+The **Settings** panel stores per-user preferences in `user_settings`:
+
+- **Personalized predictions** use your own completion history. Turning this off
+  falls back to the cold-start baseline and stops recording new labeled
+  predictions.
+- **Recommendations** control whether Time Machine suggests changes at all.
+- **Shared learning** and **AI assistance** are opt-in and off by default. Task
+  text is never included in shared learning, and LLM features are deferred until
+  the opt-in layer ships.
+- **Auto-create recurring tasks** sets the default for new series; each series
+  still has its own switch.
+- **Email reminders**, time zone, and language tag are stored with the account.
+
+Settings changes take effect on the next request; no restart is needed.
 
 ### Invite-only beta
 
@@ -193,6 +221,30 @@ states. Per-user calibration is fitted after enough labeled predictions and is
 used on subsequent forecasts. The insights endpoint reports Brier score,
 calibration error, acceptance rate, and observed patterns.
 
+## Recurring series
+
+Completing the same personal task at least three times on a regular cadence
+(daily, weekly, every two weeks, or monthly) creates a series suggestion. Team
+tasks are excluded: their history stays baseline-only for Time Machine.
+
+Suggestions are listed in **Recurring series** on the personal task page. They
+start inactive and never create tasks until the owner opts in. Each series has
+its own controls:
+
+- **Auto-create** is off by default. Turn it on per series and new occurrences
+  appear as ordinary tasks labelled **From series**.
+- **Pause / Resume** stops and restarts scheduling without losing the series.
+- **Skip next** advances past the upcoming occurrence and removes the generated
+  task if it is still open.
+- **End** stops the series permanently and clears its schedule.
+
+At most one generated task per series is open at a time. Materialization runs
+lazily on list requests and is idempotent: a series may create at most one task
+per occurrence, and deleted occurrences stay reserved through the
+`tasks_series_occurrence_uq` unique index. Series are stored per user in the
+Time Machine JSON store; generated tasks live in Postgres with their
+`source = 'recurrence'`, `series_id`, and `occurrence_at` columns.
+
 ## API
 
 All `/api/tasks` and `/api/teams` routes require the session cookie.
@@ -207,6 +259,10 @@ Unauthenticated requests get `401`.
 | `GET`    | `/api/auth/sessions`                  | —                                                     | `{ sessions }`   |
 | `DELETE` | `/api/auth/sessions/:id`              | —                                                     | 204              |
 | `POST`   | `/api/auth/sessions/revoke-others`    | —                                                     | `{ revoked }`    |
+| `POST`   | `/api/auth/email/verification`        | —                                                     | `{ sent }`       |
+| `POST`   | `/api/auth/email/verify`              | `{ token }`                                           | `{ user }`       |
+| `POST`   | `/api/auth/password/forgot`           | `{ email }`                                           | `{ sent }`       |
+| `POST`   | `/api/auth/password/reset`            | `{ token, password }`                                 | 204              |
 | `GET`    | `/api/account/export`                 | —                                                     | JSON download    |
 | `DELETE` | `/api/account`                        | `{ password }`                                        | 204              |
 | `GET`    | `/api/teams`                          | —                                                     | `{ teams }`      |
@@ -227,10 +283,18 @@ Unauthenticated requests get `401`.
 | `POST`   | `/api/recommendations/:id/apply`      | `{ expectedVersion }`                                 | task + forecast  |
 | `POST`   | `/api/recommendations/:id/dismiss`    | `{ reason? }`                                         | 204              |
 | `POST`   | `/api/recommendations/impressions`    | `{ ids: string[] }`                                   | 204              |
+| `GET`    | `/api/recommendations/:id`            | —                                                     | `{ recommendation }` |
 | `GET`    | `/api/time-machine/insights`          | —                                                     | `{ insights }`   |
 | `GET`    | `/api/time-machine/outcomes(?taskId)` | —                                                     | `{ outcomes }`   |
 | `GET`    | `/api/series`                         | —                                                     | `{ series }`     |
+| `POST`   | `/api/series`                         | `{ title, rrule, timezone?, autoCreate? }`            | `{ series }` (201, 409 on duplicate) |
+| `PATCH`  | `/api/series/:id`                     | `{ autoCreate?, status? }`                            | `{ series }`     |
+| `POST`   | `/api/series/:id/skip`                | —                                                     | `{ series }`     |
+| `POST`   | `/api/series/materialize`             | —                                                     | `{ series, tasks }` |
+| `GET`    | `/api/settings`                       | —                                                     | `{ settings }`   |
+| `PATCH`  | `/api/settings`                       | partial `UserSettings`                                | `{ settings }`   |
 | `GET`    | `/api/reminders(?status)`             | —                                                     | `{ reminders }`  |
+| `POST`   | `/api/reminders/:id/dismiss`          | —                                                     | 204              |
 | `GET`    | `/api/health`                         | —                                                     | `{ ok }`         |
 
 ## Testing
@@ -248,7 +312,8 @@ API_BASE=http://localhost:3011 npm test
 ```
 
 `npm test` covers the task API, teams, prediction engine, Time Machine,
-auth hardening, database foundation, and the JSON importer.
+auth hardening, settings, email verification and reset, recurring series,
+database foundation, and the JSON importer.
 `tests/db-foundation.test.mjs` and `tests/migration.test.mjs` create their own
 temporary databases and do not touch your local data.
 
@@ -266,10 +331,14 @@ API over HTTPS so the `Secure` cookie is accepted.
 
 ## Features
 
-- Email + password accounts with salted scrypt hashes and `HttpOnly` session
-  cookies
+- Email + password accounts with salted scrypt hashes, `HttpOnly` session
+  cookies, email verification, and single-use password reset links
 - Private per-user task lists, with the signed-in email and sign-out in the
   header
+- Settings for time zone, language, prediction and recommendation privacy,
+  shared-learning and AI opt-ins, reminder email, and recurring-task defaults
+- A Time Machine insights view with calibration score, Brier score, acceptance
+  rate, and detected scheduling patterns
 - Add, complete, edit (double-click), and delete tasks
 - Optional deadline (date + time) when creating a task, shown as a relative
   badge (overdue / due today / due tomorrow / date)
@@ -284,6 +353,9 @@ API over HTTPS so the `Secure` cookie is accepted.
   panel: progress, deadline, progress updates, and created / last updated /
   completed timestamps
 - Drag to reorder in the All view
+- Recurring-series detection from three or more regular completions, with
+  per-series opt-in auto-create, pause/resume, skip, and end controls
 - Light/dark theme, following the system by default
 - `/` focuses the new-task input
-- Server-side validation, serialized writes, and a corrupt-file backup
+- Server-side validation, idempotent migrations, and atomic JSON writes for
+  model and invite state

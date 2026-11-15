@@ -9,6 +9,7 @@ import {
   createTask,
   deletePersonalTasksForUser,
   getTaskForUser,
+  hasSeriesOccurrence,
   listTasksForUser,
   removeTask,
   reorderTasks,
@@ -79,7 +80,51 @@ export class TaskStore {
       version: 1,
       progress: 0,
       milestones: [],
+      source: 'manual',
     });
+  }
+
+  /**
+   * Create the task for one occurrence of a recurring series. The due date is
+   * the occurrence itself, and `source`/`seriesId`/`occurrenceAt` are recorded
+   * so the UI can label it and so materialization can stay idempotent.
+   */
+  async addRecurring(
+    userId: string,
+    creatorEmail: string | null,
+    title: string,
+    dueAt: string,
+    seriesId: string,
+  ): Promise<Task> {
+    const now = new Date().toISOString();
+    return createTask(await getDb(), {
+      id: randomUUID(),
+      userId,
+      creatorEmail,
+      teamId: null,
+      assigneeEmail: null,
+      priority: 'Medium',
+      category: null,
+      text: title,
+      done: false,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null,
+      dueAt,
+      scheduledStartAt: null,
+      reminderAt: null,
+      version: 1,
+      progress: 0,
+      milestones: [],
+      source: 'recurrence',
+      seriesId,
+      occurrenceAt: dueAt,
+    });
+  }
+
+  /** True when this series already has a task (even deleted) for an occurrence. */
+  async hasOccurrence(seriesId: string, occurrenceAt: string): Promise<boolean> {
+    return hasSeriesOccurrence(await getDb(), seriesId, occurrenceAt);
   }
 
   async update(

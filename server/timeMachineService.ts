@@ -17,6 +17,11 @@ import {
   type TimeMachineTaskInput,
 } from './timeMachine';
 import type { TaskStore } from './store';
+import { canonicalRrule, normalizeSeriesTitle } from '../shared/recurrence.ts';
+import {
+  createSeries,
+  updateSeriesForUser,
+} from './recurrenceService.ts';
 import {
   TimeMachineStore,
   type OutcomeHorizon,
@@ -695,26 +700,44 @@ export async function applyRecommendation(params: {
       checkpoints.map((text) => ({ text, progress: task.progress })),
     );
   } else if (record.type === 'recurrence_series') {
-    if (!record.payload.rrule) {
+    const rrule = canonicalRrule(record.payload.rrule ?? '');
+    if (!rrule) {
       throw new TimeMachineError(
         422,
         'EMPTY_RECOMMENDATION',
         'This recommendation has no recurrence rule.',
       );
     }
-    series = {
-      id: randomUUID(),
-      userId,
-      title: record.payload.title ?? task.text,
-      rrule: record.payload.rrule,
-      timezone: 'UTC',
-      autoCreate: false,
-      status: 'active',
-      nextAt: null,
-      createdAt: nowIso,
-      updatedAt: nowIso,
-    };
-    await deps.timeMachine.upsertSeries(series);
+    const title = (record.payload.title ?? task.text).trim().slice(0, 200);
+    const key = normalizeSeriesTitle(title);
+    const existing = deps.timeMachine
+      .listSeries(userId)
+      .find((entry) => normalizeSeriesTitle(entry.title) === key);
+
+    if (existing) {
+      series =
+        (await updateSeriesForUser({
+          deps,
+          userId,
+          id: existing.id,
+          patch: {
+            title,
+            rrule,
+            status: existing.status === 'ended' ? 'active' : existing.status,
+          },
+          now,
+        })) ?? undefined;
+    } else {
+      series =
+        (await createSeries({
+          deps,
+          userId,
+          title,
+          rrule,
+          autoCreate: false,
+          now,
+        })) ?? undefined;
+    }
   } else {
     const patch: {
       dueAt?: string;

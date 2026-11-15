@@ -9,6 +9,21 @@ import type {
   TimeMachineRecommendation,
 } from '../shared/types';
 
+export type SeriesPatch = Partial<
+  Pick<
+    RecurringSeries,
+    | 'title'
+    | 'rrule'
+    | 'timezone'
+    | 'autoCreate'
+    | 'status'
+    | 'nextAt'
+    | 'sampleCount'
+    | 'detectionConfidence'
+    | 'lastMaterializedAt'
+  >
+>;
+
 export type OutcomeHorizon = '24h' | '7d' | 'deadline' | '30d';
 
 export type OutcomeStatus =
@@ -482,6 +497,41 @@ export class TimeMachineStore {
         entry.title.trim().toLowerCase() === normalized,
     );
     return record ? clone(record) : null;
+  }
+
+  getSeries(userId: string, id: string): RecurringSeries | null {
+    const record = this.data.series.find(
+      (entry) => entry.id === id && entry.userId === userId,
+    );
+    return record ? clone(record) : null;
+  }
+
+  /** Update a series the user owns. Returns null when it is not theirs. */
+  async updateSeries(
+    userId: string,
+    id: string,
+    patch: SeriesPatch,
+  ): Promise<RecurringSeries | null> {
+    return this.mutate((data) => {
+      const existing = data.series.find(
+        (entry) => entry.id === id && entry.userId === userId,
+      );
+      if (!existing) return { next: data, result: null };
+      const updated: RecurringSeries = {
+        ...existing,
+        ...patch,
+        updatedAt: new Date().toISOString(),
+      };
+      return {
+        next: {
+          ...data,
+          series: data.series.map((entry) =>
+            entry.id === id ? updated : entry,
+          ),
+        },
+        result: clone(updated),
+      };
+    });
   }
 
   listSeries(userId: string): RecurringSeries[] {
