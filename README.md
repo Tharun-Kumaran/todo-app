@@ -92,6 +92,7 @@ Overrides:
 | `PGLITE_DATA_DIR`     | `server/data/pglite`        | PGlite data directory                |
 | `DATABASE_URL`        | unset                       | Postgres connection string           |
 | `DATABASE_POOL_MAX`   | `15`                        | Postgres pool size                   |
+| `DATABASE_SSL`        | unset                       | `require`, `verify`, or `disable` for the Postgres connection |
 | `TODO_TIME_MACHINE_FILE` | `server/data/time-machine.json` | Time Machine records and model state |
 | `TODO_INVITES_FILE`   | `server/data/invites.json`  | Invite-code store                    |
 | `TODO_INVITE_ONLY`    | unset                       | Set to `1` to require an invite code |
@@ -296,6 +297,7 @@ Unauthenticated requests get `401`.
 | `GET`    | `/api/reminders(?status)`             | —                                                     | `{ reminders }`  |
 | `POST`   | `/api/reminders/:id/dismiss`          | —                                                     | 204              |
 | `GET`    | `/api/health`                         | —                                                     | `{ ok }`         |
+| `GET`    | `/api/ready`                          | —                                                     | `{ ok, database }` (503 when the DB is down) |
 
 ## Testing
 
@@ -317,17 +319,123 @@ database foundation, and the JSON importer.
 `tests/db-foundation.test.mjs` and `tests/migration.test.mjs` create their own
 temporary databases and do not touch your local data.
 
-## Deploying the frontend
+## Deploying to production
 
-`.github/workflows/deploy-pages.yml` builds the frontend and publishes `dist`
-to GitHub Pages on every push to `main`.
+The production image is a single Node process that serves the API and the built
+UI from the same origin. Postgres holds all account data; a persistent disk (or
+a mounted volume) holds the two JSON stores. TLS terminates at the host or a
+reverse proxy in front of the container.
 
-GitHub Pages only serves static files, so the local API is **not**
-available there. The deployed page will show a connection error until you host
-the Express server elsewhere and set `VITE_API_BASE_URL` to its URL at build
-time. For a cross-origin API, also set `TODO_CORS_ORIGIN` to the Pages origin;
-if the cookie must cross sites, set `TODO_COOKIE_SAMESITE=none` and serve the
-API over HTTPS so the `Secure` cookie is accepted.
+### Option A: Render blueprint
+
+`render.yaml` creates a Docker web service, a managed Postgres database, and a
+1 GB disk mounted at `/data`. The service starts on the **Starter** plan because
+Render's free tier does not support persistent disks.
+
+1. Push this repository to GitHub (already the case for
+   `Tharun-Kumaran/todo-app`).
+2. In Render: **New → Blueprint**, select the repo, and apply the blueprint.
+3. When prompted, set the `sync: false` secrets:
+   - `TODO_PUBLIC_URL`: the public origin, e.g. `https://todo.example.com`
+     (no trailing slash). Email links use it.
+   - `RESEND_API_KEY`: from [Resend](https://resend.com/api-keys).
+   - `TODO_EMAIL_FROM`: a verified sender, e.g. `To-Do <no-reply@example.com>`.
+4. Wait for the deploy to become healthy at `/api/ready`.
+5. Create the first invite from the service **Shell**:
+
+   ```sh
+   npm run invite:create -- --email you@example.com --uses 1 --days 30
+   ```
+
+   Registration stays invite-only (`TODO_INVITE_ONLY=1`). To open sign-ups
+   later, change that env var to `0` and redeploy. Keep it on for the beta.
+
+Without `RESEND_API_KEY` the service still runs: verification and reset links
+are written to the log and `email_outbox`, but no mail is delivered.
+
+### Option B: any Docker host + managed Postgres
+
+Works with Fly.io, Railway, a VPS, or any container platform. Use Neon,
+Supabase, or the host's Postgres for the database.
+
+```sh
+docker build -t todo-app .
+docker run -p 3001:3001 \
+  -e NODE_ENV=production \
+  -e DB_DRIVER=postgres \
+  -e DATABASE_URL='postgres://user:pass@host:5432/todo' \
+  -e DATABASE_SSL=require \
+  -e TODO_PUBLIC_URL='https://todo.example.com' \
+  -e TODO_INVITE_ONLY=1 \
+  -e RESEND_API_KEY='re_...' \
+  -e TODO_EMAIL_FROM='To-Do <no-reply@example.com>' \
+  -v todo-data:/data \
+  todo-app
+```
+
+Point the platform's health check at `/api/ready` (checks the database) or
+`/api/health` (process only), and terminate TLS in front of port 3001. The app
+trusts one proxy hop (`trust proxy`) and enables HSTS when `NODE_ENV=production`,
+so cookies are `Secure` behind HTTPS.
+
+Required production settings:
+
+| Variable | Notes |
+| -------- | ----- |
+| `DB_DRIVER=postgres` | Do not run production on PGlite. |
+| `DATABASE_URL` | Managed Postgres connection string. |
+| `DATABASE_SSL` | `require` for Render/Neon/Supabase; `verify` only if the CA is trusted. |
+| `TODO_PUBLIC_URL` | Public origin; otherwise email links use the request origin. |
+| `TODO_INVITE_ONLY=1` | Invite-only beta. |
+| `TODO_TIME_MACHINE_FILE`, `TODO_INVITES_FILE` | Point inside the mounted volume. The image defaults to `/data/*.json`. |
+| `RESEND_API_KEY`, `TODO_EMAIL_FROM` | Real email delivery. Optional, but required for self-serve sign-up. |
+
+Migrations run automatically at startup and are idempotent, so deploying a new
+image is enough to apply schema changes. Seed a new database by letting the
+service start once; there is no separate migration command.
+
+### Post-deploy smoke test
+
+```sh
+curl -fsS https://your-host/api/health   # {"ok":true}
+curl -fsS https://your-host/api/ready    # {"ok":true,"database":"postgres"}
+```
+
+Then in the browser: register with an invite you created from the shell, add a
+task, mark it complete, reload, and confirm it persisted. Request a password
+reset and check that the email arrives. Sign in on a second account and confirm
+tasks are private.
+
+### Backups and restore
+
+- **Postgres** is the source of truth for accounts and tasks. Use the provider's
+  automatic backups, or `pg_dump "$DATABASE_URL" > todo.sql` on a schedule.
+  Restore with `psql "$DATABASE_URL" < todo.sql` before starting the service.
+- **JSON stores** (`time-machine.json`, `invites.json`) live on the disk. Copy
+  them off the host periodically (`cat /data/time-machine.json`) and keep the
+  copies with the database backups. On Render, open the service Shell.
+- **Invite codes** cannot be recovered from `invites.json` (only hashes are
+  stored). Keep raw codes somewhere safe; otherwise revoke and reissue.
+- Run one instance while the JSON stores are on disk. Two instances with
+  separate disks would diverge; move those stores into Postgres before scaling
+  horizontally.
+
+### Continuous integration
+
+`.github/workflows/ci.yml` installs dependencies, runs `npm run build`
+(type-check + Vite build), and runs `npm run test:db` against a throwaway
+PGlite database on every push and pull request.
+
+### GitHub Pages (frontend only)
+
+`.github/workflows/deploy-pages.yml` still publishes `dist` to GitHub Pages on
+every push to `main`. Pages only serves static files, so it is useful as a
+preview, not as the production deployment.
+
+For a split frontend/API setup, set `VITE_API_BASE_URL` to the API URL at build
+time, set `TODO_CORS_ORIGIN` to the Pages origin, and use
+`TODO_COOKIE_SAMESITE=none` with an HTTPS API so the cross-site cookie is
+accepted. The single-origin Docker deployment above avoids all of that.
 
 ## Features
 

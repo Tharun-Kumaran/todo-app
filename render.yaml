@@ -1,0 +1,52 @@
+# Render blueprint: https://render.com/docs/blueprint-spec
+#
+# One Docker web service plus a managed Postgres database. The disk keeps the
+# Time Machine and invite JSON stores across deploys.
+#
+# Deploy with: Render Dashboard -> New -> Blueprint -> pick this repo.
+# Secrets marked `sync: false` are prompted for in the dashboard.
+
+databases:
+  - name: todo-db
+    databaseName: todo
+    user: todo
+    plan: basic-256mb
+    region: oregon
+
+services:
+  - type: web
+    name: todo-app
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    region: oregon
+    healthCheckPath: /api/ready
+    autoDeploy: true
+    disk:
+      name: todo-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DB_DRIVER
+        value: postgres
+      - key: DATABASE_URL
+        fromDatabase:
+          name: todo-db
+          property: connectionString
+      - key: DATABASE_SSL
+        value: require
+      - key: TODO_INVITE_ONLY
+        value: "1"
+      - key: TODO_SESSION_DAYS
+        value: "30"
+      # Public origin used in verification and password-reset links, e.g.
+      # https://todo.example.com (no trailing slash).
+      - key: TODO_PUBLIC_URL
+        sync: false
+      # Add these after verifying a sending domain in Resend.
+      - key: RESEND_API_KEY
+        sync: false
+      - key: TODO_EMAIL_FROM
+        sync: false

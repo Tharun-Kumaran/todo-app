@@ -40,6 +40,25 @@ function configuredDriver(): DbDriver {
     : 'pglite';
 }
 
+/**
+ * Managed Postgres providers (Render, Neon, Supabase, ...) require TLS and
+ * usually present a certificate chain that Node does not have in its trust
+ * store. `DATABASE_SSL=require` encrypts without strict verification;
+ * `verify` enforces it when the provider certificate is trusted.
+ */
+function configuredSsl(): false | { rejectUnauthorized: boolean } | undefined {
+  const raw = process.env.DATABASE_SSL?.trim().toLowerCase();
+  if (!raw) return undefined;
+  if (['0', 'false', 'disable', 'off'].includes(raw)) return false;
+  if (['verify', 'verify-full', 'strict'].includes(raw)) {
+    return { rejectUnauthorized: true };
+  }
+  if (['1', 'true', 'require', 'yes', 'on'].includes(raw)) {
+    return { rejectUnauthorized: false };
+  }
+  return undefined;
+}
+
 function asRows<T extends Record<string, unknown>>(
   value: unknown,
 ): T[] {
@@ -103,6 +122,7 @@ class PostgresDb implements Db {
       connectionString,
       max: Number(process.env.DATABASE_POOL_MAX) || 15,
       statement_timeout: 5_000,
+      ssl: configuredSsl(),
     });
   }
 

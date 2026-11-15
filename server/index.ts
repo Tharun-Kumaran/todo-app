@@ -1096,6 +1096,21 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true });
 });
 
+/**
+ * Readiness check for load balancers and hosts: unlike `/api/health` it also
+ * proves the database is reachable. Returns 503 so the platform keeps the
+ * instance out of rotation instead of serving 500s.
+ */
+app.get('/api/ready', async (_req, res) => {
+  try {
+    await db.query('select 1');
+    res.json({ ok: true, database: dbInfo().driver });
+  } catch (error) {
+    console.error('Readiness check failed:', error);
+    res.status(503).json({ ok: false, error: 'Database unavailable.' });
+  }
+});
+
 app.get('/api/tasks', requireUser, async (req, res, next) => {
   try {
     const teamId =
@@ -2042,6 +2057,23 @@ const server = app.listen(port, () => {
   );
   if (existsSync(distDir)) {
     console.log(`Serving built UI from ${distDir}`);
+  }
+  if (process.env.NODE_ENV === 'production') {
+    if (database.driver !== 'postgres') {
+      console.warn(
+        'Warning: production is using PGlite. Set DB_DRIVER=postgres and DATABASE_URL so data survives redeploys.',
+      );
+    }
+    if (!process.env.TODO_PUBLIC_URL) {
+      console.warn(
+        'Warning: TODO_PUBLIC_URL is unset; email links will use the request origin.',
+      );
+    }
+    if (!process.env.RESEND_API_KEY) {
+      console.warn(
+        'Warning: RESEND_API_KEY is unset; verification and reset emails are logged, not delivered.',
+      );
+    }
   }
 });
 
